@@ -74,6 +74,7 @@ import app.smugly.ui.theme.SmuglyStroke
 import app.smugly.ui.theme.SmuglyTextMuted
 import app.smugly.AppLanguage
 import app.smugly.Config
+import app.smugly.isDesktop
 import app.smugly.ConfigProfile
 import app.smugly.GlobalSettings
 import app.smugly.S
@@ -1216,7 +1217,12 @@ fun SettingsScreen(
         "English" to AppLanguage.EN,
         "Русский" to AppLanguage.RU
     )
-    val modeOptions = listOf(t(S.CONNECTION_MODE_PROXY), t(S.CONNECTION_MODE_VPN))
+    // Same setting, different machinery: a VpnService on the phone, a TUN adapter on the
+    // desktop. Calling it "VPN" on Windows would suggest something the app does not do.
+    val modeOptions = listOf(
+        t(S.CONNECTION_MODE_PROXY),
+        t(if (app.smugly.currentHostPlatform().isDesktop()) S.CONNECTION_MODE_TUN else S.CONNECTION_MODE_VPN)
+    )
     val modeIndex = if (settings.mode == Config.Mode.VPN) 1 else 0
     val langIndex = languageOptions.indexOfFirst { it.second == settings.language }.coerceAtLeast(0)
 

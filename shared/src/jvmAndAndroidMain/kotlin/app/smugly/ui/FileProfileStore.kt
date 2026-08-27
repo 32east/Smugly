@@ -136,7 +136,14 @@ class FileProfileStore(
             collapsedCategories = app.smugly.CollapsedCategories.decode(
                 json.optString("collapsedCategories", "")
             ),
-            appHttpProxy = json.optBoolean("appHttpProxy", false)
+            appHttpProxy = json.optBoolean("appHttpProxy", false),
+            perAppMode = runCatching {
+                app.smugly.PerAppMode.valueOf(
+                    json.optString("perAppMode", app.smugly.PerAppMode.OFF.name)
+                )
+            }.getOrDefault(app.smugly.PerAppMode.OFF),
+            perAppPackages = app.smugly.PerAppPackages.decode(json.optString("perAppPackages", "")),
+            autoUpdate = json.optBoolean("autoUpdate", true)
         )
     }
 
@@ -158,6 +165,9 @@ class FileProfileStore(
                 app.smugly.CollapsedCategories.encode(settings.collapsedCategories)
             )
             .put("appHttpProxy", settings.appHttpProxy)
+            .put("perAppMode", settings.perAppMode.name)
+            .put("perAppPackages", app.smugly.PerAppPackages.encode(settings.perAppPackages))
+            .put("autoUpdate", settings.autoUpdate)
         settingsFile.writeText(json.toString(2))
     }
 }

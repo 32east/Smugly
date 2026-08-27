@@ -121,6 +121,8 @@ enum class S(val en: String, val ru: String) {
     AUTH_LOGIN_PASSWORD("login/password", "логин/пароль"),
     CONNECTION_MODE_PROXY("proxy", "прокси"),
     CONNECTION_MODE_VPN("vpn", "VPN"),
+    /** Same slot on desktop, where the system-wide tunnel is a TUN adapter rather than a VpnService. */
+    CONNECTION_MODE_TUN("tun", "TUN"),
 
     // Checkboxes
     USE_BASE64U_ENCODING("Use base64u encoding", "Использовать кодировку base64u"),

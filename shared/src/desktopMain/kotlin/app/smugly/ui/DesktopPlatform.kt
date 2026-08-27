@@ -9,8 +9,11 @@ import app.smugly.VlessLinkParser
 import app.smugly.XrayConfigBuilder
 import app.smugly.currentHostPlatform
 import app.smugly.defaultConfig
+import app.smugly.desktop.DesktopTun
 import app.smugly.desktop.DesktopTunnel
 import app.smugly.desktop.EngineBinaries
+import app.smugly.desktop.TunConfig
+import app.smugly.desktop.WindowsProcesses
 import app.smugly.platform.PlatformLog
 import app.smugly.platform.LogLevel
 import app.smugly.supportsSystemVpn
@@ -69,8 +72,12 @@ class DesktopPlatform(
     private fun snapshot(): ConnectUiState {
         val running = DesktopTunnel.isRunning
         val proxy = DesktopTunnel.proxyServer()
-        val rx = proxy?.rxBytes() ?: 0L
-        val tx = proxy?.txBytes() ?: 0L
+        // In TUN mode the local proxy is out of the path, so its counters would sit at zero for
+        // a tunnel that is moving gigabytes. sing-box's own totals are the real ones there.
+        val tunMode = DesktopTunnel.isTunRunning
+        if (tunMode) DesktopTun.refreshTraffic()
+        val rx = if (tunMode) DesktopTun.rxBytes() else proxy?.rxBytes() ?: 0L
+        val tx = if (tunMode) DesktopTun.txBytes() else proxy?.txBytes() ?: 0L
         val status = when {
             connecting -> t(S.STATUS_CONNECTING)
             running -> t(S.STATUS_CONNECTED)
@@ -101,7 +108,7 @@ class DesktopPlatform(
             running = running && !connecting,
             connecting = connecting,
             diagnosticsText = buildString {
-                appendLine("running=$running connecting=$connecting")
+                appendLine("running=$running connecting=$connecting tun=$tunMode")
                 appendLine("connections=${proxy?.activeConnections() ?: 0} ok=${proxy?.connectOkCount() ?: 0} fail=${proxy?.connectFailCount() ?: 0}")
                 if (lastError.isNotBlank()) appendLine("lastError=$lastError")
                 appendLine(engineReportCache)
@@ -207,11 +214,18 @@ class DesktopPlatform(
             result
                 .onSuccess { outcome ->
                     outcome.warning?.let { toast(it) }
+                    // Say which one actually happened: "connected" means something very
+                    // different when only proxy-aware apps are covered.
+                    val where = if (outcome.tunApplied) {
+                        "TUN ${TunConfig.INTERFACE_NAME}"
+                    } else {
+                        "127.0.0.1:${outcome.listenPort}"
+                    }
                     toast(
                         if (app.smugly.Strings.current == app.smugly.AppLanguage.RU) {
-                            "Подключено (${outcome.engineName}) — 127.0.0.1:${outcome.listenPort}"
+                            "Подключено (${outcome.engineName}) — $where"
                         } else {
-                            "Connected (${outcome.engineName}) — 127.0.0.1:${outcome.listenPort}"
+                            "Connected (${outcome.engineName}) — $where"
                         }
                     )
                 }
@@ -462,7 +476,25 @@ class DesktopPlatform(
         null
     }
 
-    override fun supportsSystemVpn(): Boolean = currentHostPlatform().supportsSystemVpn()
+    /**
+     * Windows can now host a real system-wide tunnel (a TUN adapter), not just a local proxy, so
+     * the connection-mode selector offers it there. Elsewhere on desktop the adapter and route
+     * handling are unimplemented and the proxy path is the only honest answer.
+     */
+    override fun supportsSystemVpn(): Boolean =
+        currentHostPlatform().supportsSystemVpn() || DesktopTun.isSupported()
+
+    // ---- split tunnelling ----
+
+    /**
+     * Only meaningful in TUN mode: the system-proxy path has no per-app control at all — an app
+     * either reads the proxy setting or it does not. The screen stays reachable while in proxy
+     * mode so the list can be prepared before switching, and [DesktopTunnel] applies it on the
+     * next connect.
+     */
+    override fun supportsPerAppProxy(): Boolean = DesktopTun.isSupported()
+
+    override fun loadInstalledApps(): List<app.smugly.ui.InstalledApp> = WindowsProcesses.list()
 
     override fun toast(message: String) {
         PlatformLog.log(LogLevel.INFO, "UI", message)

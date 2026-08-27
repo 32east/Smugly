@@ -130,7 +130,7 @@ fun SmuglyApp(platform: SmuglyPlatform, shortcuts: AppShortcuts? = null) {
             mutableStateOf(loaded)
         }
         var connect by remember { mutableStateOf(ConnectUiState.idle()) }
-        /** Installed apps for the split-tunnelling picker; loaded once, the first time it opens. */
+        /** Apps for the split-tunnelling picker; re-read each time that screen is opened. */
         var installedApps by remember { mutableStateOf<List<InstalledApp>>(emptyList()) }
         var installedAppsLoading by remember { mutableStateOf(false) }
         /** "reconnect to apply" is worth saying once per session, not once per checkbox. */
@@ -743,14 +743,16 @@ fun SmuglyApp(platform: SmuglyPlatform, shortcuts: AppShortcuts? = null) {
                         )
                     }
                     AppScreen.PER_APP -> {
-                        // PackageManager sweep: off the UI thread, and only once — the list
-                        // does not change while the app is in the foreground, and re-reading it
-                        // on every visit would stall the screen for a second each time.
+                        // Re-read on every visit, off the UI thread. The list is not static: on
+                        // Android an app can be installed while Smugly is open, and on desktop it
+                        // is the set of *running* processes, so a list cached at first visit would
+                        // be missing the very app the user just started in order to pick it. The
+                        // previous list stays on screen while the sweep runs, so nothing blinks.
                         LaunchedEffect(Unit) {
-                            if (installedApps.isEmpty() && !installedAppsLoading) {
+                            if (!installedAppsLoading) {
                                 installedAppsLoading = true
                                 val loaded = withContext(Dispatchers.Default) { ui.loadInstalledApps() }
-                                installedApps = loaded
+                                if (loaded.isNotEmpty() || installedApps.isEmpty()) installedApps = loaded
                                 installedAppsLoading = false
                             }
                         }

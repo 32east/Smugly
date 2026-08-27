@@ -176,7 +176,7 @@ fun PerAppScreen(
                 }
                 Spacer(Modifier.height(6.dp))
             }
-            if (loading) {
+            if (loading && visible.isEmpty()) {
                 item(key = "loading") {
                     Text(
                         t(S.PER_APP_LOADING),

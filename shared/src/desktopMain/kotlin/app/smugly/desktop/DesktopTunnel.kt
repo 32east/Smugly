@@ -46,7 +46,9 @@ object DesktopTunnel {
         val listenPort: Int,
         val engineName: String,
         val systemProxyApplied: Boolean,
-        val warning: String? = null
+        val warning: String? = null,
+        /** True when the virtual adapter owns the default route (see [DesktopTun]). */
+        val tunApplied: Boolean = false
     )
 
     @Volatile private var engine: EngineProcess? = null
@@ -62,6 +64,9 @@ object DesktopTunnel {
         System.getenv("SMUGLY_NO_SYSTEM_PROXY")?.lowercase() in setOf("1", "true", "yes")
 
     val isRunning: Boolean get() = proxy?.isRunning() == true && engine?.isAlive == true
+
+    /** True while the virtual adapter is carrying traffic (TUN mode), not just the local proxy. */
+    val isTunRunning: Boolean get() = DesktopTun.isRunning
     fun proxyServer(): MixedProxyServer? = proxy
     fun engineLogTail(): String = engine?.logTail().orEmpty()
 
@@ -131,7 +136,29 @@ object DesktopTunnel {
 
             var warning: String? = null
             var applied = false
-            if (WindowsSystemProxy.isWindows && !systemProxyDisabled()) {
+            var tun = false
+            // TUN mode replaces the system proxy rather than joining it: with the adapter owning
+            // the default route, a proxy setting on top would send WinINET apps through the
+            // listener *and* through the TUN, i.e. twice into the same tunnel.
+            if (settings.mode == Config.Mode.VPN && DesktopTun.isSupported()) {
+                DesktopTun.start(
+                    // The engine, not the local proxy: a TUN carries UDP and MixedProxyServer
+                    // accepts CONNECT only, so routing through it would drop QUIC, voice and games.
+                    socksPort = enginePort,
+                    mode = settings.perAppMode,
+                    processes = settings.perAppPackages,
+                    ownProcesses = DesktopTun.ownProcessNames(),
+                    debugLog = settings.fileLogging
+                ).getOrElse {
+                    // The tunnel itself is up on the local port, so falling back to proxy-only
+                    // leaves the user connected rather than dropping them for a missing binary
+                    // or a missing administrator token.
+                    warning = "TUN mode could not start: ${it.message} — running as a local proxy instead"
+                    null
+                }
+                tun = DesktopTun.isRunning
+            }
+            if (!tun && WindowsSystemProxy.isWindows && !systemProxyDisabled()) {
                 val previous = WindowsSystemProxy.apply("127.0.0.1:$listenPort").getOrElse {
                     // The tunnel itself is up; only the system-wide switch failed. Keep running so
                     // the user can still point apps at 127.0.0.1:<port> by hand.
@@ -155,9 +182,9 @@ object DesktopTunnel {
             PlatformLog.log(
                 LogLevel.INFO, TAG,
                 "connected engine=${spec.name} local=127.0.0.1:$listenPort engine=127.0.0.1:$enginePort " +
-                    "systemProxy=$applied"
+                    "systemProxy=$applied tun=$tun"
             )
-            StartOutcome(listenPort, spec.name, applied, warning)
+            StartOutcome(listenPort, spec.name, applied, warning, tun)
         }.onFailure {
             PlatformLog.log(LogLevel.ERROR, TAG, "connect failed: ${it.message}")
             stop()
@@ -165,6 +192,9 @@ object DesktopTunnel {
     }
 
     fun stop() {
+        // Adapter first: it owns the default route, so tearing it down before the proxy it feeds
+        // means no traffic is ever pointed at a listener that has already gone.
+        DesktopTun.stop()
         if (systemProxyApplied || WindowsSystemProxy.hasPendingRestore()) {
             WindowsSystemProxy.restore()
             systemProxyApplied = false
