@@ -26,7 +26,7 @@ class FileProfileStore(
 
     fun loadSubscriptions(): List<app.smugly.subscription.Subscription> =
         runCatching {
-            subscriptionsFile.takeIf { it.exists() }?.readText().orEmpty()
+            subscriptionsFile.takeIf { it.exists() }?.readJsonText().orEmpty()
         }.getOrDefault("").let { app.smugly.subscription.SubscriptionJson.listFromString(it) }
 
     fun saveSubscriptions(subs: List<app.smugly.subscription.Subscription>) {
@@ -52,7 +52,7 @@ class FileProfileStore(
     }
 
     fun loadProfiles(): List<ConfigProfile> {
-        val arr = runCatching { JSONArray(profilesFile.readText()) }.getOrNull() ?: return emptyList()
+        val arr = runCatching { JSONArray(profilesFile.readJsonText()) }.getOrNull() ?: return emptyList()
         return buildList {
             for (i in 0 until arr.length()) {
                 add(ConfigJson.profileFromJson(arr.getJSONObject(i)))
@@ -112,9 +112,29 @@ class FileProfileStore(
         writeProfiles(reordered + rest)
     }
 
+    /**
+     * Read a JSON file the way every tool on the machine might have written it.
+     *
+     * A UTF-8 byte-order mark is invisible in an editor and fatal to a JSON parser, and on Windows
+     * it is the *default*: PowerShell's `Set-Content -Encoding utf8` and Notepad both add one. The
+     * cost of not handling it is silent — the parse fails, defaults are returned, and every
+     * setting the user chose is quietly gone. Measured exactly that way while scripting a test.
+     */
+    private fun java.io.File.readJsonText(): String = readText().removePrefix("\uFEFF")
+
     fun loadGlobalSettings(): GlobalSettings {
-        val json = runCatching { JSONObject(settingsFile.readText()) }.getOrNull()
-            ?: return defaultGlobalSettings()
+        val json = runCatching { JSONObject(settingsFile.readJsonText()) }.getOrNull()
+            ?: run {
+                // Losing every setting in silence is worse than any parse error. It looks exactly
+                // like the app "forgetting" what the user chose, with nothing anywhere saying why.
+                app.smugly.platform.PlatformLog.log(
+                    app.smugly.platform.LogLevel.WARN,
+                    "FileProfileStore",
+                    "settings.json could not be parsed (${settingsFile.absolutePath}); " +
+                        "falling back to defaults"
+                )
+                return defaultGlobalSettings()
+            }
         return GlobalSettings(
             listenPort = json.optInt("listenPort", 1080),
             mode = runCatching {

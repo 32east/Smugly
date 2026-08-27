@@ -38,6 +38,13 @@ private fun cliMain(args: Array<String>) {
             println("OK protocol=${config.protocol} domain=${config.domain} port=${config.listenPort}")
         }
         args.contains("--engines") -> println(EngineBinaries.report())
+        // Everything TUN mode needs, without starting anything: which binaries were found, whether
+        // this process is elevated, and the one sentence saying what is missing. Safe to run while
+        // another tunnel is up, which is exactly when you want to check it.
+        args.contains("--tun-check") -> {
+            println(DesktopTun.report())
+            println("preflight: " + (DesktopTun.preflight() ?: "OK"))
+        }
         args.contains("--connect") -> runHeadless()
         args.contains("--latency") ->
             measureLatency(args.getOrNull(args.indexOf("--latency") + 1))
@@ -67,7 +74,7 @@ private fun cliMain(args: Array<String>) {
         }
         else -> println(
             "Unknown args. Use --print-platform | --write-default-config | --validate-config | " +
-                "--engines | --connect | --latency [name] | --latency-config <file.json> | " +
+                "--engines | --tun-check | --connect | --latency [name] | --latency-config <file.json> | " +
                 "--show-system-proxy | --restore-system-proxy, or no args for GUI."
         )
     }

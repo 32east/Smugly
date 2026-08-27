@@ -35,8 +35,18 @@ object DesktopTun {
         "TUN mode needs administrator rights: the virtual adapter and the routes it installs are " +
             "privileged operations. Restart Smugly as administrator, or use proxy mode."
 
-    private const val READY_TIMEOUT_MS = 15_000L
+    /**
+     * Generous on purpose. Creating a Wintun adapter is a driver operation, and how long it takes
+     * varies wildly: measured at ~3s on a cold start but past 15s when one was torn down moments
+     * earlier, with sing-box itself logging "open interface take too much time to finish". A tight
+     * limit here does not fail loudly -- it drops the user to proxy mode for a tunnel that was
+     * about to work, which is the quiet leak this whole mode exists to close.
+     */
+    private const val READY_TIMEOUT_MS = 45_000L
     private const val POLL_INTERVAL_MS = 250L
+
+    /** How long the adapter is given to actually disappear after its process is killed. */
+    private const val ADAPTER_RELEASE_TIMEOUT_MS = 20_000L
 
     /** The TUN's own address; its presence on an interface is proof the adapter came up. */
     private const val TUN_HOST_ADDRESS = "172.19.0.1"
@@ -212,10 +222,31 @@ object DesktopTun {
         // Killing the process is the whole teardown: Wintun adapters are owned by their creator,
         // so the adapter and every route sing-box installed disappear with it. Nothing to unwind
         // by hand, and nothing left behind if we are killed instead of asked.
+        val had = process != null
         process?.stop()
         process = null
         apiPort = 0
         apiSecret = ""
+        // ...but not *instantly*. Removing the adapter is a driver operation that outlives the
+        // process by seconds, and starting the next one on top of a half-removed adapter is how a
+        // reconnect ends up waiting 45s and then giving up. Measured: back-to-back start/stop
+        // failed every time until this wait was added. Bounded, because a stop that hangs must
+        // never be worse than a stop that returns early.
+        if (had) waitForAdapterGone(ADAPTER_RELEASE_TIMEOUT_MS)
+    }
+
+    /** Wait for the TUN address to disappear from every interface. True if it did. */
+    private fun waitForAdapterGone(timeoutMs: Long): Boolean {
+        val deadline = System.currentTimeMillis() + timeoutMs
+        while (System.currentTimeMillis() < deadline) {
+            if (!adapterIsUp()) return true
+            Thread.sleep(POLL_INTERVAL_MS)
+        }
+        PlatformLog.log(
+            LogLevel.WARN, TAG,
+            "the TUN adapter was still present ${timeoutMs}ms after sing-box exited"
+        )
+        return false
     }
 
     /**
