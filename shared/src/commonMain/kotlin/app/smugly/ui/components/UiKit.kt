@@ -697,10 +697,15 @@ fun AccentLinkButton(text: String, onClick: () -> Unit) {
 }
 
 @Composable
-fun SmuglyCheckbox(checked: Boolean, label: String, onCheckedChange: (Boolean) -> Unit) {
+fun SmuglyCheckbox(
+    checked: Boolean,
+    label: String,
+    modifier: Modifier = Modifier,
+    onCheckedChange: (Boolean) -> Unit
+) {
     Row(
         verticalAlignment = Alignment.CenterVertically,
-        modifier = Modifier
+        modifier = modifier
             .fillMaxWidth()
             .handClickable { onCheckedChange(!checked) }
             .padding(vertical = 0.dp)
@@ -1125,11 +1130,14 @@ fun DrawerPanel(
     showDiagnostics: Boolean,
     onSelect: (AppDrawerItem) -> Unit,
     modifier: Modifier = Modifier,
+    /** Split tunnelling — only where the platform routes per app (Android). */
+    showPerApp: Boolean = false,
     /** Branding line under nav items, e.g. "0.1.0 · 2026-07-27". */
     versionLabel: String = AppVersion.name + " · " + AppVersion.buildDate
 ) {
     val items = buildList {
         add(AppDrawerItem.HOME)
+        if (showPerApp) add(AppDrawerItem.PER_APP)
         if (showDiagnostics) add(AppDrawerItem.DIAGNOSTICS)
         add(AppDrawerItem.SETTINGS)
     }
@@ -1195,11 +1203,12 @@ fun DrawerPanel(
 }
 
 enum class AppDrawerItem {
-    HOME, DIAGNOSTICS, SETTINGS;
+    HOME, PER_APP, DIAGNOSTICS, SETTINGS;
 
     @Composable
     fun label(): String = when (this) {
         HOME -> app.smugly.t(app.smugly.S.HOME)
+        PER_APP -> app.smugly.t(app.smugly.S.PER_APP)
         DIAGNOSTICS -> app.smugly.t(app.smugly.S.DIAGNOSTICS)
         SETTINGS -> app.smugly.t(app.smugly.S.SETTINGS)
     }

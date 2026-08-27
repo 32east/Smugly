@@ -1,10 +1,13 @@
 package app.smugly
 
+import android.Manifest
 import android.app.Activity
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
+import android.content.pm.ApplicationInfo
+import android.content.pm.PackageManager
 import android.net.Uri
 import android.net.VpnService
 import android.os.Handler
@@ -12,8 +15,11 @@ import android.os.Looper
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
+import androidx.core.graphics.drawable.toBitmap
 import app.smugly.tunnel.HevSocks5Tunnel
 import app.smugly.tunnel.MiniSlipstreamSocksBridge
 import app.smugly.tunnel.ResolverListConfig
@@ -21,9 +27,11 @@ import app.smugly.tunnel.CdnfuBridge
 import app.smugly.tunnel.S3fuBridge
 import app.smugly.tunnel.SlipstreamBridge
 import app.smugly.tunnel.XrayBridge
+import app.smugly.update.AppUpdater
 import app.smugly.util.AppLog
 import app.smugly.service.TinyVpnService
 import app.smugly.ui.ConnectUiState
+import app.smugly.ui.InstalledApp
 import app.smugly.ui.SmuglyPlatform
 import java.util.Base64
 import java.util.concurrent.CopyOnWriteArrayList
@@ -38,6 +46,9 @@ private const val TAG_PLATFORM = "AndroidSmuglyPlatform"
 
 /** How long a profile switch waits for the old tunnel to go away before starting the new one. */
 private const val RECONNECT_STOP_TIMEOUT_MS = 12_000L
+
+/** Decode size for launcher icons in the split-tunnelling list (row draws them at 38dp). */
+private const val APP_ICON_PX = 144
 
 class AndroidSmuglyPlatform(
     private val activity: ComponentActivity
@@ -525,6 +536,93 @@ class AndroidSmuglyPlatform(
 
     override fun localDnsResolver(): String? =
         ResolverSelector.preferredLocalResolver(activity)
+
+    // ---- split tunnelling (per-app proxy) ----
+
+    override fun supportsPerAppProxy(): Boolean = true
+
+    override fun loadInstalledApps(): List<InstalledApp> {
+        val pm = activity.packageManager
+        val own = activity.packageName
+        val installed = runCatching {
+            @Suppress("DEPRECATION")
+            pm.getInstalledPackages(PackageManager.GET_PERMISSIONS)
+        }.getOrElse {
+            AppLog.w(TAG_PLATFORM, "getInstalledPackages failed: ${it.message}")
+            emptyList()
+        }
+        // Everything with a launcher entry, in one query rather than a getLaunchIntentForPackage
+        // IPC per package. This is what separates a preinstalled app the user actually opens
+        // (Chrome, the browser, the bank) from platform plumbing they have never seen
+        // (WebView, SafetyCore, the key verifier) — the FLAG_SYSTEM bit alone does not: it is
+        // set on both, and clearing it for updated system apps let all the plumbing through.
+        val launchable = runCatching {
+            @Suppress("DEPRECATION")
+            pm.queryIntentActivities(
+                Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER),
+                0
+            ).mapTo(mutableSetOf()) { it.activityInfo.packageName }
+        }.getOrElse {
+            AppLog.w(TAG_PLATFORM, "queryIntentActivities failed: ${it.message}")
+            emptySet()
+        }
+        return installed.asSequence()
+            // Our own package is never offered: every protocol dials its server from this
+            // process, so routing it into the TUN is a loop, whichever mode is picked.
+            .filter { it.packageName != own }
+            // Only apps that can open a socket. Without this the list is padded out with
+            // hundreds of packages that split tunnelling cannot affect either way.
+            .filter { it.requestedPermissions?.contains(Manifest.permission.INTERNET) == true }
+            .mapNotNull { info ->
+                val appInfo = info.applicationInfo ?: return@mapNotNull null
+                InstalledApp(
+                    packageName = info.packageName,
+                    label = runCatching { pm.getApplicationLabel(appInfo).toString() }
+                        .getOrDefault(info.packageName)
+                        .ifBlank { info.packageName },
+                    // Preinstalled *and* not something the user can open. Chrome and the dialer
+                    // are FLAG_SYSTEM too, and hiding those would bury exactly the apps this
+                    // screen exists for.
+                    isSystem = (appInfo.flags and ApplicationInfo.FLAG_SYSTEM) != 0 &&
+                        info.packageName !in launchable
+                )
+            }
+            .sortedWith(compareBy({ it.label.lowercase() }, { it.packageName }))
+            .toList()
+    }
+
+    override fun loadAppIcon(packageName: String): ImageBitmap? = runCatching {
+        // Fixed pixel size: an adaptive icon reports its own intrinsic bounds (often 108dp at
+        // xxxhdpi) and decoding that for a 38dp row is a needless multi-MB bitmap per app.
+        activity.packageManager.getApplicationIcon(packageName)
+            .toBitmap(APP_ICON_PX, APP_ICON_PX)
+            .asImageBitmap()
+    }.getOrNull()
+
+    // ---- in-app updates ----
+
+    override fun supportsAppUpdates(): Boolean = true
+
+    override fun installedVersionName(): String = AppUpdater.installedVersion(activity)
+
+    override fun observeUpdate(onChange: (UpdateStatus) -> Unit): () -> Unit {
+        // AppUpdater's worker threads publish directly; hop to the main thread so the
+        // composition never has state written to it from a download thread.
+        val stop = AppUpdater.observe { status -> handler.post { onChange(status) } }
+        return stop
+    }
+
+    override fun autoCheckForUpdate(enabled: Boolean) = AppUpdater.autoCheck(activity, enabled)
+
+    override fun checkForUpdate() = AppUpdater.checkNow(activity)
+
+    override fun downloadUpdate(release: AppRelease) = AppUpdater.downloadAndInstall(activity, release)
+
+    override fun installUpdate(release: AppRelease) = AppUpdater.install(activity, release)
+
+    override fun skipUpdate(release: AppRelease) = AppUpdater.skip(activity, release)
+
+    override fun dismissUpdate() = AppUpdater.dismiss()
 
     // ---- subscriptions ----
 

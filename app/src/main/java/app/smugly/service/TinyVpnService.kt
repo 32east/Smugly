@@ -29,6 +29,7 @@ import app.smugly.tunnel.XrayBridge
 import app.smugly.util.AppLog
 import app.smugly.Config
 import app.smugly.ConfigStore
+import app.smugly.PerAppFilter
 import app.smugly.effectiveCdnfuToml
 import app.smugly.effectiveS3fuToml
 import app.smugly.ComposeMainActivity
@@ -251,8 +252,7 @@ class TinyVpnService : VpnService() {
                 .addRoute("::", 0)
                 .addDnsServer(VPN_DNS_PRIMARY)
                 .addDnsServer(VPN_DNS_SECONDARY)
-            runCatching { builder.addDisallowedApplication(packageName) }
-                .onFailure { AppLog.w(TAG, "addDisallowedApplication failed: ${it.message}") }
+            applyAppFilter(builder)
             tunFd = builder.establish() ?: error("VpnService.Builder.establish returned null")
 
             HevSocks5Tunnel.start(
@@ -339,8 +339,7 @@ class TinyVpnService : VpnService() {
                 // Same as CDNFU: raw DNS UDP to 1.1.1.1 through S3 is lossy (Telegram
                 // has IPs cached, browsers do not) so the tab never resolves.
                 .addDnsServer(HevSocks5Tunnel.MAPDNS_ADDRESS)
-            runCatching { builder.addDisallowedApplication(packageName) }
-                .onFailure { AppLog.w(TAG, "addDisallowedApplication failed: ${it.message}") }
+            applyAppFilter(builder)
             tunFd = builder.establish() ?: error("VpnService.Builder.establish returned null")
 
             // s3fu implements standard SOCKS5 UDP ASSOCIATE (no auth) -> hev udp='udp'.
@@ -375,7 +374,7 @@ class TinyVpnService : VpnService() {
     /**
      * CDNFU protocol path: native cdn-fuckup XHTTP packet-up client as local SOCKS5,
      * then hev-socks5-tunnel on top — same shape as S3FU. TLS to the CDN edge leaves
-     * the device outside the TUN via addDisallowedApplication.
+     * the device outside the TUN via [applyAppFilter], which always excludes our own package.
      */
     private fun startCdnfuTunnelWorker(generation: Int, config: Config) {
         currentConfig = config
@@ -423,8 +422,7 @@ class TinyVpnService : VpnService() {
                 // mapdns answers here; apps must NOT use 1.1.1.1 (each DNS query was a full
                 // XHTTP UDP session and made the tunnel unusable).
                 .addDnsServer(HevSocks5Tunnel.MAPDNS_ADDRESS)
-            runCatching { builder.addDisallowedApplication(packageName) }
-                .onFailure { AppLog.w(TAG, "addDisallowedApplication failed: ${it.message}") }
+            applyAppFilter(builder)
             tunFd = builder.establish() ?: error("VpnService.Builder.establish returned null")
 
             // mapdns: hostname restored on SOCKS CONNECT, so DNS never rides as UDP.
@@ -523,8 +521,7 @@ class TinyVpnService : VpnService() {
                 .addRoute("::", 0)
                 .addDnsServer(VPN_DNS_PRIMARY)
                 .addDnsServer(VPN_DNS_SECONDARY)
-            runCatching { builder.addDisallowedApplication(packageName) }
-                .onFailure { AppLog.w(TAG, "addDisallowedApplication failed: ${it.message}") }
+            applyAppFilter(builder)
             if (appProxy) {
                 // Proxy-aware apps now send `CONNECT host:port` instead of dialling an address
                 // they resolved themselves, so the host name survives all the way to the routing
@@ -587,6 +584,54 @@ class TinyVpnService : VpnService() {
      * [isAlive] reports whether the native side that should be opening the port is
      * still up, so a crashed engine aborts the wait instead of burning the timeout.
      */
+    /**
+     * Apply split tunnelling to a TUN that is about to be established.
+     *
+     * Every protocol path calls this instead of excluding our own package by hand, which is why
+     * the feature is protocol-agnostic: the filter lives on the TUN, not in any engine, so
+     * Slipstream, S3FU, CDNFU and Xray all get it from the one call. [PerAppFilter] decides
+     * which of the two mutually exclusive lists to use — mixing them makes `establish()` throw.
+     *
+     * Each package is added on its own: `addAllowed/DisallowedApplication` throws
+     * `NameNotFoundException` for a package that has since been uninstalled, and one stale entry
+     * in a saved list must not take the whole tunnel down with it.
+     */
+    private fun applyAppFilter(builder: Builder) {
+        val settings = ConfigStore.loadGlobalSettings(this)
+        val plan = PerAppFilter.plan(settings.perAppMode, settings.perAppPackages, packageName)
+        if (plan.fellBackToOff) {
+            AppLog.w(
+                TAG,
+                "per-app mode=${settings.perAppMode} has no packages selected; " +
+                    "routing all apps rather than establishing a TUN nothing uses"
+            )
+        }
+        var applied = 0
+        var missing = 0
+        plan.allowed.forEach { pkg ->
+            runCatching { builder.addAllowedApplication(pkg) }
+                .onSuccess { applied++ }
+                .onFailure {
+                    missing++
+                    AppLog.w(TAG, "addAllowedApplication($pkg) failed: ${it.message}")
+                }
+        }
+        plan.disallowed.forEach { pkg ->
+            runCatching { builder.addDisallowedApplication(pkg) }
+                .onSuccess { applied++ }
+                .onFailure {
+                    missing++
+                    AppLog.w(TAG, "addDisallowedApplication($pkg) failed: ${it.message}")
+                }
+        }
+        AppLog.i(
+            TAG,
+            "per-app filter mode=${settings.perAppMode} " +
+                "allowed=${plan.allowed.size} disallowed=${plan.disallowed.size} " +
+                "applied=$applied missing=$missing"
+        )
+    }
+
     private fun waitForLocalPort(port: Int, timeoutMs: Long, isAlive: () -> Boolean): Boolean {
         val deadline = System.currentTimeMillis() + timeoutMs
         while (System.currentTimeMillis() < deadline) {

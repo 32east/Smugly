@@ -1,11 +1,14 @@
 package app.smugly.ui
 
 import app.smugly.AppLanguage
+import app.smugly.AppRelease
+import app.smugly.AppVersion
 import app.smugly.Config
 import app.smugly.ConfigProfile
 import app.smugly.DnsResolverPool
 import app.smugly.GlobalSettings
 import app.smugly.S
+import app.smugly.UpdateStatus
 import app.smugly.defaultConfig
 import app.smugly.t
 
@@ -16,8 +19,23 @@ import app.smugly.t
 enum class AppScreen {
     HOME,
     SETTINGS,
-    DIAGNOSTICS
+    DIAGNOSTICS,
+    PER_APP
 }
+
+/**
+ * One installed app in the split-tunnelling picker.
+ *
+ * The icon is deliberately not in here: labels for ~300 packages are one cheap PackageManager
+ * sweep, whereas decoding that many icons up front is seconds of jank for rows nobody scrolls
+ * to. [SmuglyPlatform.loadAppIcon] fetches them per row instead.
+ */
+data class InstalledApp(
+    val packageName: String,
+    val label: String,
+    /** Preinstalled / platform-signed. Hidden behind a toggle — the list is mostly these. */
+    val isSystem: Boolean
+)
 
 data class ConnectUiState(
     val statusText: String = "",
@@ -120,6 +138,55 @@ interface SmuglyPlatform {
     fun validateXrayConfig(json: String): String?
     fun formatXrayJson(json: String): String?
     fun localDnsResolver(): String?
+
+    // ---- split tunnelling (per-app proxy) ----
+    // Only a platform that owns the routing table can do this; on desktop the tunnel is a local
+    // proxy the OS points every app at, so there is nothing per-app to decide.
+
+    /** Whether the per-app screen is reachable at all (Android: yes; desktop / iOS: no). */
+    fun supportsPerAppProxy(): Boolean = false
+
+    /**
+     * Every app that could use the network, own package excluded (it must never ride the
+     * tunnel — see [app.smugly.PerAppFilter]). Sweeps PackageManager, so call it off the UI
+     * thread.
+     */
+    fun loadInstalledApps(): List<InstalledApp> = emptyList()
+
+    /** Launcher icon for one package, or null when it has none / cannot be decoded. */
+    fun loadAppIcon(packageName: String): androidx.compose.ui.graphics.ImageBitmap? = null
+
+    // ---- in-app updates ----
+    // The app is distributed as an APK on GitHub, so it has to tell the user about a new
+    // release itself. Platforms that install some other way leave these inert.
+
+    fun supportsAppUpdates(): Boolean = false
+
+    /** Version actually installed — not the constant compiled into the UI. */
+    fun installedVersionName(): String = AppVersion.name
+
+    fun observeUpdate(onChange: (UpdateStatus) -> Unit): () -> Unit = { }
+
+    /**
+     * Silent start-up check, throttled by the platform. Reports nothing unless there really is
+     * a newer release — a rate-limited API or a phone with no signal must not raise a dialog
+     * every launch.
+     */
+    fun autoCheckForUpdate(enabled: Boolean) {}
+
+    /** Explicit check: reports "up to date" and failures too, unlike the start-up one. */
+    fun checkForUpdate() {}
+
+    fun downloadUpdate(release: AppRelease) {}
+
+    /** Re-open the system installer for an APK already downloaded this session. */
+    fun installUpdate(release: AppRelease) {}
+
+    /** Stop offering this particular version until the user checks again by hand. */
+    fun skipUpdate(release: AppRelease) {}
+
+    /** Close the update prompt without deciding anything. */
+    fun dismissUpdate() {}
 
     // ---- subscriptions (folders) ----
     // Defaults keep platforms that have not wired storage yet (iOS) compiling and inert.

@@ -28,6 +28,9 @@ object ConfigStore {
     private const val KEY_GLOBAL_LAST_FOLDER_ID = "globalLastFolderId"
     private const val KEY_GLOBAL_COLLAPSED_CATEGORIES = "globalCollapsedCategories"
     private const val KEY_GLOBAL_APP_HTTP_PROXY = "globalAppHttpProxy"
+    private const val KEY_GLOBAL_PER_APP_MODE = "globalPerAppMode"
+    private const val KEY_GLOBAL_PER_APP_PACKAGES = "globalPerAppPackages"
+    private const val KEY_GLOBAL_AUTO_UPDATE = "globalAutoUpdate"
     private const val KEY_GLOBAL_DNS_RESOLVER_POOL = "globalDnsResolverPool"
 
     fun load(context: Context): Config {
@@ -252,7 +255,13 @@ object ConfigStore {
             collapsedCategories = CollapsedCategories.decode(
                 p.getString(KEY_GLOBAL_COLLAPSED_CATEGORIES, "")
             ),
-            appHttpProxy = p.getBoolean(KEY_GLOBAL_APP_HTTP_PROXY, false)
+            appHttpProxy = p.getBoolean(KEY_GLOBAL_APP_HTTP_PROXY, false),
+            perAppMode = enumValue(
+                p.getString(KEY_GLOBAL_PER_APP_MODE, PerAppMode.OFF.name),
+                PerAppMode.OFF
+            ),
+            perAppPackages = PerAppPackages.decode(p.getString(KEY_GLOBAL_PER_APP_PACKAGES, "")),
+            autoUpdate = p.getBoolean(KEY_GLOBAL_AUTO_UPDATE, true)
         )
     }
 
@@ -274,6 +283,9 @@ object ConfigStore {
                 CollapsedCategories.encode(settings.collapsedCategories)
             )
             .putBoolean(KEY_GLOBAL_APP_HTTP_PROXY, settings.appHttpProxy)
+            .putString(KEY_GLOBAL_PER_APP_MODE, settings.perAppMode.name)
+            .putString(KEY_GLOBAL_PER_APP_PACKAGES, PerAppPackages.encode(settings.perAppPackages))
+            .putBoolean(KEY_GLOBAL_AUTO_UPDATE, settings.autoUpdate)
             .putInt("listenPort", settings.listenPort)
             .putString("mode", settings.mode.name)
             .apply()

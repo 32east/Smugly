@@ -169,7 +169,20 @@ data class GlobalSettings(
      * Off by default: a system proxy changes how every proxy-aware app on the device connects,
      * and only the Xray tunnel has an HTTP inbound to point them at.
      */
-    val appHttpProxy: Boolean = false
+    val appHttpProxy: Boolean = false,
+    /**
+     * Split tunnelling: whether [perAppPackages] is the list of apps that use the tunnel, the
+     * list of apps that bypass it, or nothing at all. Applied to the TUN itself, so it holds
+     * for every protocol — see [PerAppFilter].
+     */
+    val perAppMode: PerAppMode = PerAppMode.OFF,
+    /** Packages the user picked. Meaning depends on [perAppMode]; ignored while it is OFF. */
+    val perAppPackages: Set<String> = emptySet(),
+    /**
+     * Look for a newer release on start-up. On by default: the app ships as an APK on GitHub
+     * rather than through a store, so nothing else would ever tell the user a fix exists.
+     */
+    val autoUpdate: Boolean = true
 )
 
 /**

@@ -36,6 +36,9 @@ enum class S(val en: String, val ru: String) {
     HOME("Home", "Главное"),
     DIAGNOSTICS("Diagnostics", "Диагностика"),
     SETTINGS("Settings", "Настройки"),
+    // Short on purpose: the drawer panel is 280dp wide and a longer name wraps to two lines
+    // while every other item is one.
+    PER_APP("Split tunneling", "Раздельный туннель"),
     NEW_PROFILE_TITLE("New Profile", "Новый профиль"),
     EDIT_PROFILE_TITLE("Edit Profile", "Редактирование"),
     DNS_RESOLVER("DNS Resolver", "DNS-резолвер"),
@@ -308,6 +311,59 @@ enum class S(val en: String, val ru: String) {
     TOAST_SUBSCRIPTION_UPDATED("Subscription updated", "Подписка обновлена"),
     TOAST_SUBSCRIPTION_FAILED("Subscription failed", "Ошибка подписки"),
     TOAST_FOLDER_SAVED("Folder saved", "Папка сохранена"),
+
+    // Per-app proxy (split tunnelling)
+    PER_APP_MODE_OFF("Off", "Выкл"),
+    PER_APP_MODE_ALLOWED("Selected only", "Только выбранные"),
+    PER_APP_MODE_DISALLOWED("All but selected", "Кроме выбранных"),
+    PER_APP_HINT_OFF(
+        "All apps go through the tunnel.",
+        "Через туннель идут все приложения."
+    ),
+    PER_APP_HINT_ALLOWED(
+        "Only the selected apps go through the tunnel; every other app connects directly.",
+        "Через туннель идут только выбранные приложения, остальные подключаются напрямую."
+    ),
+    PER_APP_HINT_DISALLOWED(
+        "The selected apps connect directly; every other app goes through the tunnel.",
+        "Выбранные приложения подключаются напрямую, остальные идут через туннель."
+    ),
+    PER_APP_HINT_EMPTY_ALLOWED(
+        "Nothing is selected, so all apps keep going through the tunnel. Pick at least one app.",
+        "Ничего не выбрано, поэтому через туннель пока идут все приложения. Выберите хотя бы одно."
+    ),
+    PER_APP_APPLIES_ON_RECONNECT(
+        "Changes take effect on the next connect.",
+        "Изменения применятся при следующем подключении."
+    ),
+    PER_APP_SEARCH_HINT("Search apps", "Поиск приложений"),
+    PER_APP_SHOW_SYSTEM("Show system apps", "Показывать системные приложения"),
+    PER_APP_CLEAR("Clear", "Снять все"),
+    PER_APP_LOADING("Loading apps…", "Загружаем приложения…"),
+    PER_APP_NOTHING_FOUND("Nothing found", "Ничего не найдено"),
+    TOAST_PER_APP_RECONNECT(
+        "reconnect to apply",
+        "переподключитесь, чтобы применить"
+    ),
+
+    // In-app updates (GitHub releases)
+    UPDATES_SECTION("Updates", "Обновления"),
+    UPDATE_AUTO("Check for updates automatically", "Проверять обновления автоматически"),
+    UPDATE_CHECK_BTN("Check for updates", "Проверить обновления"),
+    UPDATE_CURRENT_VERSION("Installed version", "Установленная версия"),
+    UPDATE_AVAILABLE_TITLE("Update available", "Доступно обновление"),
+    UPDATE_DOWNLOADING("Downloading…", "Загружаем…"),
+    UPDATE_READY_TITLE("Update downloaded", "Обновление загружено"),
+    UPDATE_READY_MESSAGE(
+        "Android asks for the last confirmation itself — an app cannot install another one silently.",
+        "Последнее подтверждение запрашивает сам Android — приложение не может установить другое молча."
+    ),
+    UPDATE_INSTALL_BTN("Install", "Установить"),
+    UPDATE_NOW_BTN("Update", "Обновить"),
+    UPDATE_SKIP_BTN("Skip this version", "Пропустить эту версию"),
+    TOAST_UPDATE_CHECKING("checking for updates…", "проверяем обновления…"),
+    TOAST_UPDATE_UP_TO_DATE("you have the latest version", "у вас последняя версия"),
+    TOAST_UPDATE_FAILED("update check failed", "не удалось проверить обновления"),
 
     // Default profile names
     PROFILE_NAME_DEFAULT_IMPORTED("Profile", "Профиль"),

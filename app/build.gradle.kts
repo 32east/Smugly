@@ -8,6 +8,24 @@ plugins {
 }
 
 val minSdkVersion = 24
+
+/**
+ * The released version, in one place. Keep in step with `AppVersion.name` in `:shared`, which is
+ * only the number the drawer prints — the in-app updater compares against what the package
+ * manager reports, i.e. this one.
+ */
+val appVersionName = "0.1.1"
+
+/**
+ * Derived, never hand-written: Android refuses to install an APK whose versionCode is lower than
+ * the installed one, so a release that bumped only the name would be rejected by the very
+ * updater that offered it. `major*10000 + minor*100 + patch` keeps ordering intact and leaves
+ * room for 99 minors / 99 patches.
+ */
+val appVersionCode = appVersionName.split(".").let { parts ->
+    fun part(i: Int) = parts.getOrNull(i)?.takeWhile(Char::isDigit)?.toIntOrNull() ?: 0
+    part(0) * 10_000 + part(1) * 100 + part(2)
+}
 val cargoProfile = (findProperty("CARGO_PROFILE") as String?) ?: run {
     if (gradle.startParameter.taskNames.any { it.contains("Release", ignoreCase = true) }) "release" else "debug"
 }
@@ -29,8 +47,8 @@ android {
         applicationId = "app.smugly"
         minSdk = minSdkVersion
         targetSdk = 35
-        versionCode = 1
-        versionName = "0.1.0"
+        versionCode = appVersionCode
+        versionName = appVersionName
         ndk {
             abiFilters += "arm64-v8a"
         }

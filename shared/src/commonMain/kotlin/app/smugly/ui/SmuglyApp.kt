@@ -33,10 +33,13 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.unit.dp
+import app.smugly.AppRelease
 import app.smugly.Config
 import app.smugly.ConfigProfile
+import app.smugly.GlobalSettings
 import app.smugly.S
 import app.smugly.Strings
+import app.smugly.UpdateStatus
 import app.smugly.currentHostPlatform
 import app.smugly.defaultConfig
 import app.smugly.supportsLocalProxyAuth
@@ -48,8 +51,10 @@ import app.smugly.ui.components.ConfirmDialog
 import app.smugly.ui.components.CrashReportDialog
 import app.smugly.ui.components.DrawerPanel
 import app.smugly.ui.components.LoadingOverlay
+import app.smugly.ui.components.UpdateDialog
 import app.smugly.ui.screens.DiagnosticsScreen
 import app.smugly.ui.screens.HomeScreen
+import app.smugly.ui.screens.PerAppScreen
 import app.smugly.ui.screens.ProfileEditorScreen
 import app.smugly.ui.screens.SettingsScreen
 import app.smugly.ui.theme.SmuglyBg
@@ -125,6 +130,14 @@ fun SmuglyApp(platform: SmuglyPlatform, shortcuts: AppShortcuts? = null) {
             mutableStateOf(loaded)
         }
         var connect by remember { mutableStateOf(ConnectUiState.idle()) }
+        /** Installed apps for the split-tunnelling picker; loaded once, the first time it opens. */
+        var installedApps by remember { mutableStateOf<List<InstalledApp>>(emptyList()) }
+        var installedAppsLoading by remember { mutableStateOf(false) }
+        /** "reconnect to apply" is worth saying once per session, not once per checkbox. */
+        var perAppReconnectHinted by remember { mutableStateOf(false) }
+        var updateStatus by remember { mutableStateOf<UpdateStatus>(UpdateStatus.Idle) }
+        /** Kept while the dialog animates out — see [UpdateDialog]. */
+        var updateRelease by remember { mutableStateOf<AppRelease?>(null) }
         /** Latency chips, keyed by profile id. */
         var latencies by remember { mutableStateOf(mapOf<String, LatencyUi>()) }
         /** Non-null while the profile editor is on screen (or sliding out). */
@@ -139,10 +152,40 @@ fun SmuglyApp(platform: SmuglyPlatform, shortcuts: AppShortcuts? = null) {
                 toastText = msg
                 toastVisible = true
             }
+            val stopUpdate = ui.observeUpdate { status ->
+                // The two terminal outcomes of a *manual* check are answers, not a dialog:
+                // say them in a toast and drop straight back to Idle so nothing lingers.
+                when (status) {
+                    is UpdateStatus.UpToDate -> {
+                        updateStatus = UpdateStatus.Idle
+                        ui.toast(t(S.TOAST_UPDATE_UP_TO_DATE))
+                    }
+                    is UpdateStatus.Failed -> {
+                        updateStatus = UpdateStatus.Idle
+                        ui.toast(status.message.ifBlank { t(S.TOAST_UPDATE_FAILED) })
+                    }
+                    else -> {
+                        updateStatus = status
+                        when (status) {
+                            is UpdateStatus.Available -> updateRelease = status.release
+                            is UpdateStatus.Downloading -> updateRelease = status.release
+                            is UpdateStatus.ReadyToInstall -> updateRelease = status.release
+                            else -> Unit
+                        }
+                    }
+                }
+            }
             onDispose {
                 stopConnect()
                 stopToast()
+                stopUpdate()
             }
+        }
+
+        // Start-up update check. Keyed on the setting so switching it on checks right away
+        // instead of waiting for the next launch.
+        LaunchedEffect(settings.autoUpdate) {
+            if (ui.supportsAppUpdates()) ui.autoCheckForUpdate(settings.autoUpdate)
         }
 
         // Auto-hide toast after a short hold; exit is a fade (instant appear).
@@ -267,6 +310,23 @@ fun SmuglyApp(platform: SmuglyPlatform, shortcuts: AppShortcuts? = null) {
             screen = to
         }
 
+        /**
+         * Persist a split-tunnelling change.
+         *
+         * The TUN's app filter is fixed at `establish()`, so an edit made while connected only
+         * lands on the next connect. Said once per visit rather than on every tick — the screen
+         * carries the same sentence permanently, this is just the nudge for someone who is
+         * looking at the checkbox and not at the hint.
+         */
+        fun savePerApp(next: GlobalSettings) {
+            settings = next
+            ui.saveGlobalSettings(next)
+            if ((connect.running || connect.connecting) && !perAppReconnectHinted) {
+                perAppReconnectHinted = true
+                ui.toast(t(S.TOAST_PER_APP_RECONNECT))
+            }
+        }
+
                 /**
          * Mount the editor parked off-screen (slide = 1f), let it compose 1–2 frames there so the
          * first layout / JIT is not paid during the slide, then animate in. Without the wait the
@@ -338,6 +398,8 @@ fun SmuglyApp(platform: SmuglyPlatform, shortcuts: AppShortcuts? = null) {
             dismissKeyboard()
             val target = when (item) {
                 AppDrawerItem.HOME -> AppScreen.HOME
+                AppDrawerItem.PER_APP ->
+                    if (ui.supportsPerAppProxy()) AppScreen.PER_APP else null
                 AppDrawerItem.DIAGNOSTICS ->
                     if (settings.fileLogging) AppScreen.DIAGNOSTICS else null
                 AppDrawerItem.SETTINGS -> AppScreen.SETTINGS
@@ -346,18 +408,16 @@ fun SmuglyApp(platform: SmuglyPlatform, shortcuts: AppShortcuts? = null) {
             closeDrawer(durationMs = 260)
         }
 
-        // System Back / Esc: drawer → close; editor → home; settings/diag → home.
+        // System Back / Esc: drawer → close; editor → home; any non-Home tab → home.
         PlatformBackHandler(
             enabled = drawerOpen || drawerProgress.value > 0.05f ||
                 editor != null ||
-                screen == AppScreen.SETTINGS ||
-                screen == AppScreen.DIAGNOSTICS
+                screen != AppScreen.HOME
         ) {
             when {
                 drawerOpen || drawerProgress.value > 0.05f -> closeDrawer()
                 editor != null -> leaveEditor()
-                screen == AppScreen.SETTINGS || screen == AppScreen.DIAGNOSTICS ->
-                    goFromDrawer(AppScreen.HOME)
+                screen != AppScreen.HOME -> goFromDrawer(AppScreen.HOME)
             }
         }
 
@@ -664,6 +724,10 @@ fun SmuglyApp(platform: SmuglyPlatform, shortcuts: AppShortcuts? = null) {
                             supportsVpn = ui.supportsSystemVpn(),
                             showTrafficNotification = currentHostPlatform().supportsTrafficNotification(),
                             showLocalSocksAuth = currentHostPlatform().supportsLocalProxyAuth(),
+                            showUpdates = ui.supportsAppUpdates(),
+                            installedVersion = ui.installedVersionName(),
+                            checkingUpdate = updateStatus is UpdateStatus.Checking,
+                            onCheckUpdate = { ui.checkForUpdate() },
                             onMenu = { openDrawer() },
                             onChange = { next ->
                                 val fixed = if (ui.supportsSystemVpn()) next
@@ -676,6 +740,29 @@ fun SmuglyApp(platform: SmuglyPlatform, shortcuts: AppShortcuts? = null) {
                                 Strings.set(fixed.language)
                                 uiTick++
                             }
+                        )
+                    }
+                    AppScreen.PER_APP -> {
+                        // PackageManager sweep: off the UI thread, and only once — the list
+                        // does not change while the app is in the foreground, and re-reading it
+                        // on every visit would stall the screen for a second each time.
+                        LaunchedEffect(Unit) {
+                            if (installedApps.isEmpty() && !installedAppsLoading) {
+                                installedAppsLoading = true
+                                val loaded = withContext(Dispatchers.Default) { ui.loadInstalledApps() }
+                                installedApps = loaded
+                                installedAppsLoading = false
+                            }
+                        }
+                        PerAppScreen(
+                            apps = installedApps,
+                            loading = installedAppsLoading,
+                            mode = settings.perAppMode,
+                            selected = settings.perAppPackages,
+                            onMenu = { openDrawer() },
+                            onModeChange = { savePerApp(settings.copy(perAppMode = it)) },
+                            onSelectedChange = { savePerApp(settings.copy(perAppPackages = it)) },
+                            loadIcon = { ui.loadAppIcon(it) }
                         )
                     }
                     AppScreen.DIAGNOSTICS -> {
@@ -821,9 +908,11 @@ fun SmuglyApp(platform: SmuglyPlatform, shortcuts: AppShortcuts? = null) {
                 selected = when (screen) {
                     AppScreen.SETTINGS -> AppDrawerItem.SETTINGS
                     AppScreen.DIAGNOSTICS -> AppDrawerItem.DIAGNOSTICS
+                    AppScreen.PER_APP -> AppDrawerItem.PER_APP
                     else -> AppDrawerItem.HOME
                 },
                 showDiagnostics = settings.fileLogging,
+                showPerApp = ui.supportsPerAppProxy(),
                 onSelect = { item -> selectFromDrawer(item) },
                 modifier = Modifier
                     .fillMaxHeight()
@@ -863,6 +952,27 @@ fun SmuglyApp(platform: SmuglyPlatform, shortcuts: AppShortcuts? = null) {
                     ui.toast(t(S.TOAST_CRASH_REPORT_COPIED))
                 },
                 onDismiss = { crashDialogVisible = false }
+            )
+
+            // New release found (or being fetched). Same card for all three steps, so
+            // downloading does not feel like a second question.
+            UpdateDialog(
+                visible = updateStatus is UpdateStatus.Available ||
+                    updateStatus is UpdateStatus.Downloading ||
+                    updateStatus is UpdateStatus.ReadyToInstall,
+                status = updateStatus,
+                release = updateRelease,
+                currentVersion = ui.installedVersionName(),
+                onUpdate = { updateRelease?.let { ui.downloadUpdate(it) } },
+                onInstall = { updateRelease?.let { ui.installUpdate(it) } },
+                onSkip = {
+                    updateRelease?.let { ui.skipUpdate(it) }
+                    updateStatus = UpdateStatus.Idle
+                },
+                onDismiss = {
+                    ui.dismissUpdate()
+                    updateStatus = UpdateStatus.Idle
+                }
             )
 
             // A brand-new subscription has no folder tab yet, so there is nowhere to spin an

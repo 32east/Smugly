@@ -1202,6 +1202,12 @@ fun SettingsScreen(
     showTrafficNotification: Boolean = false,
     /** Local proxy username/password; hidden where the platform cannot use it (desktop). */
     showLocalSocksAuth: Boolean = true,
+    /** In-app updates from GitHub releases; hidden where the app installs some other way. */
+    showUpdates: Boolean = false,
+    /** What the package manager says is installed — not the constant compiled into the UI. */
+    installedVersion: String = "",
+    checkingUpdate: Boolean = false,
+    onCheckUpdate: () -> Unit = {},
     onMenu: () -> Unit,
     onChange: (GlobalSettings) -> Unit
 ) {
@@ -1301,6 +1307,33 @@ fun SettingsScreen(
                     singleLine = false,
                     minLines = 5
                 )
+            }
+            // Updates last: this is the only section that is about the app itself rather
+            // than about the tunnel.
+            if (showUpdates) {
+                SectionTitle(t(S.UPDATES_SECTION))
+                SmuglyCheckbox(settings.autoUpdate, t(S.UPDATE_AUTO)) {
+                    onChange(settings.copy(autoUpdate = it))
+                }
+                Spacer(Modifier.height(4.dp))
+                Row(
+                    Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Text(
+                        "${t(S.UPDATE_CURRENT_VERSION)}: $installedVersion",
+                        color = SmuglyTextSecondary,
+                        fontSize = 13.sp
+                    )
+                    AccentLinkButton(
+                        // The button is the only feedback a check that finds nothing gives
+                        // until the toast lands, so it says so while it is running.
+                        if (checkingUpdate) t(S.TOAST_UPDATE_CHECKING) else t(S.UPDATE_CHECK_BTN)
+                    ) {
+                        if (!checkingUpdate) onCheckUpdate()
+                    }
+                }
             }
         }
     }
