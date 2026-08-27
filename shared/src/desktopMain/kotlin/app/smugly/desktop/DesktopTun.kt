@@ -48,6 +48,13 @@ object DesktopTun {
     /** How long the adapter is given to actually disappear after its process is killed. */
     private const val ADAPTER_RELEASE_TIMEOUT_MS = 20_000L
 
+    /** Past this, the adapter is worth a warning so a slow connect has an explanation on record. */
+    private const val SLOW_ADAPTER_MS = 8_000L
+
+    /** Attempts at bringing the adapter up before giving up; see the retry comment in [start]. */
+    private const val START_ATTEMPTS = 3
+    private const val RETRY_BACKOFF_MS = 3_000L
+
     /** The TUN's own address; its presence on an interface is proof the adapter came up. */
     private const val TUN_HOST_ADDRESS = "172.19.0.1"
 
@@ -170,6 +177,16 @@ object DesktopTun {
         preflight()?.let { error(it) }
         val exe = binary() ?: error("sing-box.exe not found")
 
+        // An adapter left over from *any* process, not just one we stopped ourselves: after a
+        // crash, a force-kill, or a fresh launch on top of a previous run, the device is still
+        // being torn down by Windows. Creating the next one on top of that is what turns a
+        // two-second connect into a minute of nothing -- measured repeatedly. stop() covers the
+        // adapter this object owns; this covers the one it never knew about.
+        if (adapterIsUp()) {
+            PlatformLog.log(LogLevel.INFO, TAG, "an old TUN adapter is still present; waiting for it to go")
+            waitForAdapterGone(ADAPTER_RELEASE_TIMEOUT_MS)
+        }
+
         apiPort = freePort()
         apiSecret = newSecret()
         rx = 0
@@ -187,32 +204,70 @@ object DesktopTun {
             )
         )
 
-        val proc = EngineProcess(
-            name = ENGINE,
-            // `run -c` rather than a directory: one file, one source of truth, and the path is
-            // ours so a stale config from another tool can never be picked up.
-            command = listOf(exe.absolutePath, "run", "-c", configFile.absolutePath),
-            // sing-box resolves wintun.dll relative to its own directory.
-            workingDir = exe.parentFile
-        )
-        proc.reapStale()
-        proc.start().getOrThrow()
-        process = proc
+        // Retried, because the failure this hits is transient and self-clearing. Windows keeps
+        // the previous adapter's address and routes registered for a short while after the device
+        // itself is gone, and sing-box then dies with
+        //   configure tun interface: Cannot create a file when that file already exists
+        // Waiting for the *address* to disappear is not enough -- that already happened. Measured:
+        // the first connect of a session takes ~2s, an immediate reconnect fails this way and
+        // succeeds a few seconds later.
+        val startedAt = System.currentTimeMillis()
+        var lastFailure = ""
+        repeat(START_ATTEMPTS) { attempt ->
+            val proc = EngineProcess(
+                name = ENGINE,
+                // `run -c` rather than a directory: one file, one source of truth, and the path is
+                // ours so a stale config from another tool can never be picked up.
+                command = listOf(exe.absolutePath, "run", "-c", configFile.absolutePath),
+                // sing-box resolves wintun.dll relative to its own directory.
+                workingDir = exe.parentFile
+            )
+            proc.reapStale()
+            proc.start().getOrThrow()
+            process = proc
 
-        if (!waitForAdapter(READY_TIMEOUT_MS) { proc.isAlive }) {
-            val tail = proc.logTail().lines().takeLast(12).joinToString("\n")
+            if (waitForAdapter(READY_TIMEOUT_MS) { proc.isAlive }) return@repeat
+            // Distinguish the two ways this fails: the engine died with a reason worth printing,
+            // or it is alive and the adapter simply never appeared.
+            val died = !proc.isAlive
+            lastFailure = proc.logTail().lines()
+                .filter { it.isNotBlank() }
+                .takeLast(6)
+                .joinToString("\n")
+                .ifBlank { "(sing-box printed nothing)" }
             proc.stop()
             process = null
-            error(
-                "the TUN adapter did not come up within ${READY_TIMEOUT_MS / 1000}s.\n" +
-                    tail.ifBlank { "(sing-box printed nothing)" }
+            if (attempt == START_ATTEMPTS - 1) {
+                error(
+                    if (died) "sing-box exited before the TUN adapter came up.\n$lastFailure"
+                    else "the TUN adapter did not appear within ${READY_TIMEOUT_MS / 1000}s.\n$lastFailure"
+                )
+            }
+            PlatformLog.log(
+                LogLevel.WARN, TAG,
+                "TUN start attempt ${attempt + 1}/$START_ATTEMPTS failed; retrying. $lastFailure"
             )
+            waitForAdapterGone(ADAPTER_RELEASE_TIMEOUT_MS)
+            Thread.sleep(RETRY_BACKOFF_MS)
         }
+        if (!isRunning) error("sing-box is not running after $START_ATTEMPTS attempts.\n$lastFailure")
+
+        // Timed on purpose. Creating a Wintun adapter is a Windows driver operation whose cost
+        // varies by more than an order of magnitude on the same machine -- measured between 3s
+        // and 17s -- and "connecting is slow" is unanswerable without the number.
+        val adapterMs = System.currentTimeMillis() - startedAt
         PlatformLog.log(
             LogLevel.INFO, TAG,
-            "TUN up: adapter=${TunConfig.INTERFACE_NAME} socks=127.0.0.1:$socksPort mode=$mode " +
-                "apps=${processes.size}"
+            "TUN up in ${adapterMs}ms: adapter=${TunConfig.INTERFACE_NAME} socks=127.0.0.1:$socksPort " +
+                "mode=$mode apps=${processes.size}"
         )
+        if (adapterMs > SLOW_ADAPTER_MS) {
+            PlatformLog.log(
+                LogLevel.WARN, TAG,
+                "the adapter took ${adapterMs}ms to appear; this is Windows creating the Wintun " +
+                    "device, not the tunnel connecting"
+            )
+        }
     }.onFailure {
         PlatformLog.log(LogLevel.ERROR, TAG, "TUN start failed: ${it.message}")
         stop()

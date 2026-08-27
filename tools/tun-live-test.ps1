@@ -326,6 +326,10 @@ try {
 
     Log 'stopping the running Smugly'
     Stop-KnownGoodBuild
+    # A leftover *test* build from an earlier run (or from someone trying it by hand) holds the
+    # same ports and, in TUN mode, the same adapter. Not stopping it first made the harness blame
+    # the new build for a port it could never have got.
+    Stop-TestBuild
     Beat
     foreach ($port in @(1080, 1081)) {
         if (-not (Wait-PortFree $port)) { throw "port $port is still in use after stopping the old build" }

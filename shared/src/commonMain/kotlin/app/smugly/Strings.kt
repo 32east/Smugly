@@ -255,6 +255,9 @@ enum class S(val en: String, val ru: String) {
     STATUS_SPEED_PROBING("Speed probing", "Проверка скорости"),
     STATUS_DNS_PROBING("DNS probing", "Поиск DNS"),
     STATUS_STARTING("Starting", "Запуск"),
+    /** Desktop TUN mode: Windows can take tens of seconds to create the adapter, and a silent
+     *  spinner for that long is indistinguishable from a hang. */
+    STATUS_TUN_ADAPTER("Creating the TUN adapter", "Поднимаем TUN-адаптер"),
 
     NO_PROFILES_HINT(
         "You have no VPN configurations",

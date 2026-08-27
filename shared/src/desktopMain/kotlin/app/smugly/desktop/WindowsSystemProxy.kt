@@ -4,6 +4,7 @@ import app.smugly.platform.AppPaths
 import app.smugly.platform.LogLevel
 import app.smugly.platform.PlatformLog
 import java.io.File
+import java.nio.charset.Charset
 import java.util.concurrent.TimeUnit
 import org.json.JSONObject
 
@@ -109,7 +110,9 @@ object WindowsSystemProxy {
     }
 
     private fun readValue(name: String): String? {
-        val out = runCommand(listOf("reg", "query", KEY, "/v", name)) ?: return null
+        // A missing value is the normal state on a machine with no proxy configured, not a fault.
+        val out = runCommand(listOf("reg", "query", KEY, "/v", name), failureLevel = LogLevel.DEBUG)
+            ?: return null
         // "    ProxyServer    REG_SZ    127.0.0.1:2080"
         val line = out.lineSequence().firstOrNull { it.trimStart().startsWith(name, ignoreCase = true) }
             ?: return null
@@ -421,7 +424,8 @@ object WindowsSystemProxy {
     }
 
     private fun deleteValue(name: String) {
-        runCommand(listOf("reg", "delete", KEY, "/v", name, "/f"))
+        // Deleting a value that was never there is success as far as this class is concerned.
+        runCommand(listOf("reg", "delete", KEY, "/v", name, "/f"), failureLevel = LogLevel.DEBUG)
     }
 
     /**
@@ -484,20 +488,73 @@ object WindowsSystemProxy {
         }
     }
 
-    private fun runCommand(cmd: List<String>, timeoutMs: Long = 8_000): String? = runCatching {
+    /**
+     * Charset the Windows console tools actually write in when their output is redirected.
+     *
+     * Not UTF-8, and -- the part that is easy to get wrong -- not the *console* code page either.
+     * `chcp` reports the console's page (65001 on this machine), but a child process whose stdout
+     * is a pipe has no console at all and falls back to the system OEM page, 866 on a Russian
+     * install. Decoding 866 bytes as UTF-8 is what turned every `reg` diagnostic into a row of
+     * replacement characters. The OEM page comes straight from the registry, whose value is ASCII
+     * digits, so this lookup cannot be defeated by the very encoding it is trying to determine.
+     */
+    private val consoleCharset: Charset by lazy {
+        val page = readOemCodePage() ?: readConsoleCodePage()
+        when {
+            page == null -> Charset.defaultCharset()
+            page == "65001" -> Charsets.UTF_8
+            else -> listOf("cp" + page, "IBM" + page, "windows-" + page)
+                .firstNotNullOfOrNull { name -> runCatching { Charset.forName(name) }.getOrNull() }
+                ?: Charset.defaultCharset()
+        }
+    }
+
+    /** The system OEM code page, e.g. "866", from HKLM\...\Nls\CodePage\OEMCP. */
+    private fun readOemCodePage(): String? = runCatching {
+        val p = ProcessBuilder(
+            "reg", "query",
+            """HKLM\SYSTEM\CurrentControlSet\Control\Nls\CodePage""", "/v", "OEMCP"
+        ).redirectErrorStream(true).start()
+        // US-ASCII on purpose: the answer is digits, and whatever else is in the output does not
+        // need to be read correctly for them to be found.
+        val text = p.inputStream.bufferedReader(Charsets.US_ASCII).readText()
+        p.waitFor(3, TimeUnit.SECONDS)
+        Regex("""REG_SZ\s+(\d{3,5})""").find(text)?.groupValues?.get(1)
+    }.getOrNull()
+
+    private fun readConsoleCodePage(): String? = runCatching {
+        val p = ProcessBuilder("cmd", "/c", "chcp").redirectErrorStream(true).start()
+        val text = p.inputStream.bufferedReader(Charsets.US_ASCII).readText()
+        p.waitFor(3, TimeUnit.SECONDS)
+        Regex("""(\d{3,5})""").find(text)?.value
+    }.getOrNull()
+
+    /**
+     * @param failureLevel how loudly a non-zero exit is reported. `reg` answers 1 both for a real
+     *        error and for "that value is not set", and the second is the ordinary case when no
+     *        proxy was ever configured -- so the callers that expect it ask for DEBUG rather than
+     *        filling the log with warnings about nothing being wrong.
+     */
+    private fun runCommand(
+        cmd: List<String>,
+        timeoutMs: Long = 8_000,
+        failureLevel: LogLevel = LogLevel.WARN
+    ): String? = runCatching {
         val p = ProcessBuilder(cmd).redirectErrorStream(true).start()
-        val text = p.inputStream.bufferedReader().readText()
+        val text = p.inputStream.bufferedReader(consoleCharset).readText()
         if (!p.waitFor(timeoutMs, TimeUnit.MILLISECONDS)) {
             p.destroyForcibly()
-            PlatformLog.log(LogLevel.WARN, TAG, "command timed out: ${cmd.take(3).joinToString(" ")}…")
+            PlatformLog.log(LogLevel.WARN, TAG, "command timed out: ${cmd.joinToString(" ")}")
             return null
         }
         if (p.exitValue() != 0) {
             val snippet = text.trim().take(400)
+            // The whole command, not the first few words: it used to be truncated at four, which
+            // dropped the value name -- the one part that says *which* lookup failed.
             PlatformLog.log(
-                LogLevel.WARN, TAG,
-                "command exit=${p.exitValue()}: ${cmd.take(4).joinToString(" ")}" +
-                    if (snippet.isNotEmpty()) " — $snippet" else ""
+                failureLevel, TAG,
+                "command exit=${p.exitValue()}: ${cmd.joinToString(" ")}" +
+                    if (snippet.isNotEmpty()) " -> $snippet" else ""
             )
             null
         } else {

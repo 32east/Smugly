@@ -2,6 +2,8 @@ package app.smugly.desktop
 
 import app.smugly.Config
 import app.smugly.GlobalSettings
+import app.smugly.S
+import app.smugly.t
 import app.smugly.platform.AppPaths
 import app.smugly.platform.LogLevel
 import app.smugly.platform.PlatformLog
@@ -50,6 +52,16 @@ object DesktopTunnel {
         /** True when the virtual adapter owns the default route (see [DesktopTun]). */
         val tunApplied: Boolean = false
     )
+
+    /**
+     * What the connect is doing right now, for the UI to show instead of a bare spinner.
+     *
+     * TUN mode can spend tens of seconds inside a single Windows driver call, and a spinner that
+     * says nothing for that long is indistinguishable from a hang -- which is exactly how it was
+     * reported. Empty when there is nothing more specific to say than "connecting".
+     */
+    @Volatile var startPhase: String = ""
+        private set
 
     @Volatile private var engine: EngineProcess? = null
     @Volatile private var proxy: MixedProxyServer? = null
@@ -141,6 +153,7 @@ object DesktopTunnel {
             // the default route, a proxy setting on top would send WinINET apps through the
             // listener *and* through the TUN, i.e. twice into the same tunnel.
             if (settings.mode == Config.Mode.VPN && DesktopTun.isSupported()) {
+                startPhase = t(S.STATUS_TUN_ADAPTER)
                 DesktopTun.start(
                     // The engine, not the local proxy: a TUN carries UDP and MixedProxyServer
                     // accepts CONNECT only, so routing through it would drop QUIC, voice and games.
@@ -157,6 +170,7 @@ object DesktopTunnel {
                     null
                 }
                 tun = DesktopTun.isRunning
+                startPhase = ""
             }
             if (!tun && WindowsSystemProxy.isWindows && !systemProxyDisabled()) {
                 val previous = WindowsSystemProxy.apply("127.0.0.1:$listenPort").getOrElse {
@@ -186,12 +200,14 @@ object DesktopTunnel {
             )
             StartOutcome(listenPort, spec.name, applied, warning, tun)
         }.onFailure {
+            startPhase = ""
             PlatformLog.log(LogLevel.ERROR, TAG, "connect failed: ${it.message}")
             stop()
         }
     }
 
     fun stop() {
+        startPhase = ""
         // Adapter first: it owns the default route, so tearing it down before the proxy it feeds
         // means no traffic is ever pointed at a listener that has already gone.
         DesktopTun.stop()

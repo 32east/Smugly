@@ -79,6 +79,8 @@ class DesktopPlatform(
         val rx = if (tunMode) DesktopTun.rxBytes() else proxy?.rxBytes() ?: 0L
         val tx = if (tunMode) DesktopTun.txBytes() else proxy?.txBytes() ?: 0L
         val status = when {
+            // A phase, when the tunnel has one worth naming -- see DesktopTunnel.startPhase.
+            connecting && DesktopTunnel.startPhase.isNotBlank() -> DesktopTunnel.startPhase
             connecting -> t(S.STATUS_CONNECTING)
             running -> t(S.STATUS_CONNECTED)
             else -> t(S.STATUS_NOT_CONNECTED)
