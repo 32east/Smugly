@@ -2,6 +2,7 @@ package app.smugly.update
 
 import app.smugly.AppRelease
 import app.smugly.VersionCompare
+import app.smugly.subscription.SubscriptionFetcher.ProxySpec
 import org.json.JSONArray
 import org.json.JSONObject
 import java.net.HttpURLConnection
@@ -33,8 +34,12 @@ object GithubReleases {
      * pre-release is a real published build and [VersionCompare] already ranks it below the
      * final version of the same number.
      */
-    fun latest(repo: String = DEFAULT_REPO): Result<AppRelease?> =
-        fetch("https://api.github.com/repos/$repo/releases?per_page=20").mapCatching { parse(it) }
+    fun latest(
+        repo: String = DEFAULT_REPO,
+        routes: List<ProxySpec?> = listOf(null)
+    ): Result<AppRelease?> =
+        fetch("https://api.github.com/repos/$repo/releases?per_page=20", routes)
+            .mapCatching { parse(it) }
 
     /** Picks the highest-versioned APK-bearing release out of the `/releases` payload. */
     fun parse(body: String): AppRelease? {
@@ -82,8 +87,26 @@ object GithubReleases {
         )
     }
 
-    private fun fetch(url: String): Result<String> = runCatching {
-        val connection = (URL(url).openConnection() as HttpURLConnection).apply {
+    /**
+     * Try each route in turn and keep the first that answers; a null entry means "direct".
+     *
+     * The same reason subscriptions need this applies here, only harder: the network this app
+     * exists to get around is the one it has to ask about its own updates over.
+     */
+    private fun fetch(url: String, routes: List<ProxySpec?>): Result<String> {
+        var last: Throwable? = null
+        for (route in routes.ifEmpty { listOf(null) }) {
+            val result = fetchVia(url, route)
+            if (result.isSuccess) return result
+            last = result.exceptionOrNull()
+        }
+        return Result.failure(last ?: IllegalStateException("no route to GitHub"))
+    }
+
+    private fun fetchVia(url: String, route: ProxySpec?): Result<String> = runCatching {
+        val parsed = URL(url)
+        val opened = if (route == null) parsed.openConnection() else parsed.openConnection(route.toJavaProxy())
+        val connection = (opened as HttpURLConnection).apply {
             requestMethod = "GET"
             connectTimeout = CONNECT_TIMEOUT_MS
             readTimeout = READ_TIMEOUT_MS

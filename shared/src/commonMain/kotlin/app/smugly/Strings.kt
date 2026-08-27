@@ -364,6 +364,10 @@ enum class S(val en: String, val ru: String) {
     TOAST_UPDATE_CHECKING("checking for updates…", "проверяем обновления…"),
     TOAST_UPDATE_UP_TO_DATE("you have the latest version", "у вас последняя версия"),
     TOAST_UPDATE_FAILED("update check failed", "не удалось проверить обновления"),
+    TOAST_UPDATE_DOWNLOAD_FAILED(
+        "could not download the update — connect the tunnel and try again",
+        "не удалось скачать обновление — подключите туннель и попробуйте снова"
+    ),
 
     // Default profile names
     PROFILE_NAME_DEFAULT_IMPORTED("Profile", "Профиль"),

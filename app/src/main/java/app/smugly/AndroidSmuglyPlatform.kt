@@ -601,6 +601,33 @@ class AndroidSmuglyPlatform(
 
     // ---- in-app updates ----
 
+    /**
+     * Always try **both** ways round: the host may be blocked in this country (so it needs the
+     * tunnel) or, just as often, may be reachable only outside it (so the tunnel's exit is what
+     * fails). Whichever answers first wins.
+     *
+     * Shared by subscription refreshes and the updater — both fetch from the open internet on a
+     * network that may be filtering exactly what they need.
+     */
+    private fun fetchRoutes(): List<app.smugly.subscription.SubscriptionFetcher.ProxySpec?> =
+        buildList {
+            val port = ConfigStore.loadGlobalSettings(activity).listenPort
+            val local = app.smugly.subscription.SubscriptionFetcher.ProxySpec(
+                "127.0.0.1", port, socks = true
+            )
+            if (isRunning()) {
+                // Tunnel up: it is the more likely winner, but a direct attempt still follows
+                // in case the host is only served to local addresses.
+                add(local)
+                add(null)
+            } else {
+                add(null)
+                // The local proxy may still be listening even when the tunnel reports stopped
+                // (proxy-only mode), so it is worth a second attempt.
+                add(local)
+            }
+        }
+
     override fun supportsAppUpdates(): Boolean = true
 
     override fun installedVersionName(): String = AppUpdater.installedVersion(activity)
@@ -612,11 +639,13 @@ class AndroidSmuglyPlatform(
         return stop
     }
 
-    override fun autoCheckForUpdate(enabled: Boolean) = AppUpdater.autoCheck(activity, enabled)
+    override fun autoCheckForUpdate(enabled: Boolean) =
+        AppUpdater.autoCheck(activity, enabled, fetchRoutes())
 
-    override fun checkForUpdate() = AppUpdater.checkNow(activity)
+    override fun checkForUpdate() = AppUpdater.checkNow(activity, fetchRoutes())
 
-    override fun downloadUpdate(release: AppRelease) = AppUpdater.downloadAndInstall(activity, release)
+    override fun downloadUpdate(release: AppRelease) =
+        AppUpdater.downloadAndInstall(activity, release, fetchRoutes())
 
     override fun installUpdate(release: AppRelease) = AppUpdater.install(activity, release)
 
@@ -657,29 +686,8 @@ class AndroidSmuglyPlatform(
                     }
                 }
 
-                /**
-                 * Always try **both** ways round: the panel may be blocked in this country (so it
-                 * needs the tunnel) or, just as often, may be reachable only outside it (so the
-                 * tunnel's exit is what fails). Whichever answers first wins.
-                 */
                 override fun fetchRoutes(): List<app.smugly.subscription.SubscriptionFetcher.ProxySpec?> =
-                    buildList {
-                        val port = ConfigStore.loadGlobalSettings(activity).listenPort
-                        val local = app.smugly.subscription.SubscriptionFetcher.ProxySpec(
-                            "127.0.0.1", port, socks = true
-                        )
-                        if (isRunning()) {
-                            // Tunnel up: it is the more likely winner, but a direct attempt still
-                            // follows in case the panel is only served to local addresses.
-                            add(local)
-                            add(null)
-                        } else {
-                            add(null)
-                            // The local proxy may still be listening even when the tunnel reports
-                            // stopped (proxy-only mode), so it is worth a second attempt.
-                            add(local)
-                        }
-                    }
+                    this@AndroidSmuglyPlatform.fetchRoutes()
             }
         )
     }

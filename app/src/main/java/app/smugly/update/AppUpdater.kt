@@ -6,7 +6,10 @@ import android.os.Build
 import androidx.core.content.FileProvider
 import app.smugly.AppRelease
 import app.smugly.UpdateStatus
+import app.smugly.S
 import app.smugly.VersionCompare
+import app.smugly.subscription.SubscriptionFetcher.ProxySpec
+import app.smugly.t
 import app.smugly.util.AppLog
 import java.io.File
 import java.net.HttpURLConnection
@@ -71,7 +74,7 @@ object AppUpdater {
      * never to UpToDate or Failed, because nobody asked — a rate-limited GitHub or a plane-mode
      * phone must not produce a dialog on every launch. [checkNow] is the one that reports back.
      */
-    fun autoCheck(context: Context, enabled: Boolean) {
+    fun autoCheck(context: Context, enabled: Boolean, routes: List<ProxySpec?> = listOf(null)) {
         if (!enabled) return
         val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
         val last = prefs.getLong(KEY_LAST_CHECK, 0L)
@@ -83,7 +86,7 @@ object AppUpdater {
         Thread({
             try {
                 prefs.edit().putLong(KEY_LAST_CHECK, now).apply()
-                val release = findNewer(context) ?: return@Thread
+                val release = findNewer(context, routes) ?: return@Thread
                 if (release.versionName == prefs.getString(KEY_SKIPPED_VERSION, null)) {
                     AppLog.i(TAG, "update ${release.versionName} skipped by user")
                     return@Thread
@@ -98,7 +101,7 @@ object AppUpdater {
     }
 
     /** Explicit "check for updates". Reports every outcome, including "you are up to date". */
-    fun checkNow(context: Context) {
+    fun checkNow(context: Context, routes: List<ProxySpec?> = listOf(null)) {
         if (!busy.compareAndSet(false, true)) return
         publish(UpdateStatus.Checking)
         Thread({
@@ -108,7 +111,7 @@ object AppUpdater {
                     // An explicit check means the user wants to see it again.
                     .remove(KEY_SKIPPED_VERSION)
                     .apply()
-                val release = findNewer(context)
+                val release = findNewer(context, routes)
                 publish(if (release == null) UpdateStatus.UpToDate else UpdateStatus.Available(release))
             } catch (e: Throwable) {
                 publish(UpdateStatus.Failed(e.message ?: "update check failed"))
@@ -118,9 +121,9 @@ object AppUpdater {
         }, "update-check").start()
     }
 
-    private fun findNewer(context: Context): AppRelease? {
+    private fun findNewer(context: Context, routes: List<ProxySpec?>): AppRelease? {
         val current = installedVersion(context)
-        val release = GithubReleases.latest().getOrThrow() ?: run {
+        val release = GithubReleases.latest(routes = routes).getOrThrow() ?: run {
             AppLog.i(TAG, "no published release with an APK")
             return null
         }
@@ -133,17 +136,19 @@ object AppUpdater {
     }
 
     /** Download the APK, then open the installer. Progress lands on [observe]. */
-    fun downloadAndInstall(context: Context, release: AppRelease) {
+    fun downloadAndInstall(context: Context, release: AppRelease, routes: List<ProxySpec?> = listOf(null)) {
         if (!busy.compareAndSet(false, true)) return
         publish(UpdateStatus.Downloading(release, 0, release.apkSizeBytes))
         Thread({
             try {
-                val apk = download(context, release)
+                val apk = download(context, release, routes)
                 publish(UpdateStatus.ReadyToInstall(release))
                 install(context, apk)
             } catch (e: Throwable) {
+                // The raw message is a stack-shaped socket error; the toast gets the one thing
+                // the user can act on, and the log keeps the detail.
                 AppLog.e(TAG, "update download failed", e)
-                publish(UpdateStatus.Failed(e.message ?: "download failed"))
+                publish(UpdateStatus.Failed(t(S.TOAST_UPDATE_DOWNLOAD_FAILED)))
             } finally {
                 busy.set(false)
             }
@@ -178,7 +183,33 @@ object AppUpdater {
     private fun apkFile(context: Context, release: AppRelease): File =
         File(updateDir(context), "smugly-${release.versionName}.apk")
 
-    private fun download(context: Context, release: AppRelease): File {
+    /**
+     * Download the APK, trying each route until one answers; a null entry means "direct".
+     *
+     * This is not belt-and-braces. GitHub hands the API out over `api.github.com` but serves
+     * the asset itself from `release-assets.githubusercontent.com`, and on the networks this
+     * app is built for the second host is blocked while the first is not — measured: the API
+     * answered 200 and the asset host timed out. So an updater that only ever dialled direct
+     * could see the release and never be able to fetch it. Routing through our own local proxy
+     * is the fix, and it is why the app's own package is excluded from the TUN: our traffic
+     * does not ride the tunnel by accident, it has to ask for it.
+     */
+    private fun download(context: Context, release: AppRelease, routes: List<ProxySpec?>): File {
+        var last: Throwable? = null
+        for (route in routes.ifEmpty { listOf(null) }) {
+            val result = runCatching { downloadVia(context, release, route) }
+            result.getOrNull()?.let { return it }
+            last = result.exceptionOrNull()
+            AppLog.w(
+                TAG,
+                "update download via ${route?.let { "${it.host}:${it.port}" } ?: "direct"} " +
+                    "failed: ${last?.message}"
+            )
+        }
+        throw last ?: IllegalStateException("no route to the release asset")
+    }
+
+    private fun downloadVia(context: Context, release: AppRelease, route: ProxySpec?): File {
         val target = apkFile(context, release)
         // Download to a sibling temp and rename on success, so a connection dropped halfway
         // can never leave a truncated file that the next run happily tries to install.
@@ -196,7 +227,8 @@ object AppUpdater {
         var url = URL(release.apkUrl)
         var redirects = 0
         while (true) {
-            val connection = (url.openConnection() as HttpURLConnection).apply {
+            val opened = if (route == null) url.openConnection() else url.openConnection(route.toJavaProxy())
+            val connection = (opened as HttpURLConnection).apply {
                 requestMethod = "GET"
                 connectTimeout = CONNECT_TIMEOUT_MS
                 readTimeout = READ_TIMEOUT_MS
