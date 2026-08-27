@@ -38,6 +38,8 @@ object AppUpdater {
     private const val READ_TIMEOUT_MS = 30_000
     /** Downloads bigger than this are refused rather than filling the user's storage. */
     private const val MAX_APK_BYTES = 300L * 1024 * 1024
+    /** Resume attempts per route before giving up and trying the next one. */
+    private const val DOWNLOAD_ATTEMPTS = 4
 
     private val listeners = CopyOnWriteArrayList<(UpdateStatus) -> Unit>()
     private val busy = AtomicBoolean(false)
@@ -211,8 +213,8 @@ object AppUpdater {
 
     private fun downloadVia(context: Context, release: AppRelease, route: ProxySpec?): File {
         val target = apkFile(context, release)
-        // Download to a sibling temp and rename on success, so a connection dropped halfway
-        // can never leave a truncated file that the next run happily tries to install.
+        // Download to a sibling temp and rename on success, so a connection dropped halfway can
+        // never leave a truncated file that the next run happily tries to install.
         val partial = File(target.parentFile, target.name + ".part")
         // Older versions' downloads are dead weight once this one starts.
         updateDir(context).listFiles()?.forEach {
@@ -222,21 +224,69 @@ object AppUpdater {
             AppLog.i(TAG, "update ${release.versionName} already downloaded")
             return target
         }
-        partial.delete()
 
+        // Whatever this route inherited from the last one is where it starts, and the bar has to
+        // say so straight away: a new route that begins by connecting publishes nothing for
+        // fifteen seconds, and the bar would otherwise sit at the *previous* route's percentage
+        // looking frozen.
+        publish(UpdateStatus.Downloading(release, partial.length(), release.apkSizeBytes))
+
+        var attempt = 0
+        while (true) {
+            attempt++
+            val before = partial.length()
+            try {
+                fetchInto(partial, release, route)
+                break
+            } catch (e: Throwable) {
+                // Resuming is only worth it while the connection is still making headway. A
+                // tunnelled 40 MB download over a lossy transport does drop — measured: an S3
+                // profile died at 62% with an SSL record error — and without this the whole
+                // thing restarts from zero every time and may never finish.
+                val progressed = partial.length() > before
+                if (attempt >= DOWNLOAD_ATTEMPTS || !progressed) throw e
+                AppLog.w(
+                    TAG,
+                    "update download interrupted at ${partial.length()} bytes " +
+                        "(attempt $attempt): ${e.message}"
+                )
+            }
+        }
+
+        val expected = release.apkSizeBytes
+        if (expected > 0 && partial.length() != expected) {
+            error("download truncated at ${partial.length()} of $expected bytes")
+        }
+        if (partial.length() <= 0) error("downloaded nothing")
+        target.delete()
+        if (!partial.renameTo(target)) error("could not store the downloaded APK")
+        AppLog.i(TAG, "update ${release.versionName} downloaded: ${target.length()} bytes")
+        return target
+    }
+
+    /**
+     * One GET into [partial], resuming from whatever is already in it.
+     *
+     * A server that honours the range answers 206 and we append; one that ignores it answers 200
+     * with the whole file, and the only safe reading of that is "start over" — appending a full
+     * body onto a partial one produces a corrupt APK that still installs far enough to fail.
+     */
+    private fun fetchInto(partial: File, release: AppRelease, route: ProxySpec?) {
         var url = URL(release.apkUrl)
         var redirects = 0
         while (true) {
+            val have = partial.length()
             val opened = if (route == null) url.openConnection() else url.openConnection(route.toJavaProxy())
             val connection = (opened as HttpURLConnection).apply {
                 requestMethod = "GET"
                 connectTimeout = CONNECT_TIMEOUT_MS
                 readTimeout = READ_TIMEOUT_MS
-                // Followed by hand: GitHub redirects release assets to objects.githubusercontent
-                // .com, and HttpURLConnection refuses to follow a redirect that changes host,
-                // which would otherwise arrive here as an empty body.
+                // Followed by hand: GitHub redirects release assets to another host, and
+                // HttpURLConnection refuses to follow a redirect that changes host — which
+                // would otherwise arrive here as an empty body.
                 instanceFollowRedirects = false
                 setRequestProperty("User-Agent", "Smugly-Updater")
+                if (have > 0) setRequestProperty("Range", "bytes=$have-")
             }
             try {
                 val code = connection.responseCode
@@ -248,12 +298,20 @@ object AppUpdater {
                     continue
                 }
                 if (code !in 200..299) error("HTTP $code")
-                val total = connection.contentLengthLong.takeIf { it > 0 } ?: release.apkSizeBytes
+                val resuming = code == 206 && have > 0
+                if (!resuming && have > 0) {
+                    AppLog.i(TAG, "server ignored the range request; restarting the download")
+                }
+                // The API already told us the asset's size, and it is the one number that stays
+                // true across routes, retries and a 206 whose Content-Length is only the tail.
+                val total = release.apkSizeBytes.takeIf { it > 0 }
+                    ?: connection.contentLengthLong.takeIf { it > 0 }?.plus(if (resuming) have else 0L)
+                    ?: 0L
                 if (total > MAX_APK_BYTES) error("APK is unexpectedly large ($total bytes)")
-                var written = 0L
-                var lastPublished = 0L
+                var written = if (resuming) have else 0L
+                var lastPublished = written
                 connection.inputStream.use { input ->
-                    partial.outputStream().use { output ->
+                    java.io.FileOutputStream(partial, resuming).use { output ->
                         val buffer = ByteArray(64 * 1024)
                         while (true) {
                             val read = input.read(buffer)
@@ -261,23 +319,18 @@ object AppUpdater {
                             output.write(buffer, 0, read)
                             written += read
                             if (written > MAX_APK_BYTES) error("APK is unexpectedly large")
-                            // One update per 64 KB would be ~1500 recompositions for a 100 MB
+                            // One update per 64 KB would be ~700 recompositions for a 43 MB
                             // file; a percent of progress is as fine-grained as a bar can show.
                             if (total <= 0 || written - lastPublished >= total / 100 + 1) {
                                 lastPublished = written
                                 publish(UpdateStatus.Downloading(release, written, total))
                             }
                         }
+                        output.flush()
                     }
                 }
-                if (written <= 0) error("downloaded nothing")
-                if (total > 0 && written != total) {
-                    error("download truncated at $written of $total bytes")
-                }
-                target.delete()
-                if (!partial.renameTo(target)) error("could not store the downloaded APK")
-                AppLog.i(TAG, "update ${release.versionName} downloaded: $written bytes")
-                return target
+                if (total > 0 && written < total) error("stream ended at $written of $total bytes")
+                return
             } finally {
                 connection.disconnect()
             }
