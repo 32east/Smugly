@@ -161,7 +161,33 @@ class TinyVpnService : VpnService() {
         }, "vpn-start").start()
     }
 
+    /**
+     * Re-take the VPN slot before building a tunnel.
+     *
+     * `Builder.establish()` returns null — not an exception, just null — whenever this
+     * package is not the *prepared* VPN app, and Android drops that state when the
+     * package is replaced. The user's consent survives (it lives in the ACTIVATE_VPN
+     * app-op), so `VpnService.prepare()` re-claims the slot silently and returns null;
+     * only a genuinely unconsented app gets an Intent back, and that one does need the
+     * activity's confirmation dialog.
+     *
+     * Doing this here rather than only in the connect flow is what lets the service
+     * come back on its own after an app update — otherwise the tunnel is dead until
+     * somebody opens the UI and taps Connect, with `establish returned null` as the
+     * only clue (live 2026-08-29, after an `adb install -r` over a running tunnel).
+     */
+    private fun reclaimVpnConsent() {
+        try {
+            if (VpnService.prepare(this) != null) {
+                AppLog.w(TAG, "VPN consent missing — the UI must ask for it before a tunnel can start")
+            }
+        } catch (e: Throwable) {
+            AppLog.w(TAG, "VpnService.prepare failed: ${e.message}")
+        }
+    }
+
     private fun startTunnelWorker(generation: Int) {
+        reclaimVpnConsent()
         val rawConfig = ConfigStore.effectiveConfig(this)
         if (rawConfig.protocol == Config.TunnelProtocol.S3FU) {
             startS3fuTunnelWorker(generation, rawConfig)
