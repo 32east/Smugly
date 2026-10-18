@@ -95,12 +95,48 @@ hev_mapped_dns_node_free (HevMappedDNSNode *node)
     hev_free (node);
 }
 
+/* Pick the synthetic address slot for a name, as a function of the name alone.
+ *
+ * The address we hand back is cached by the application, and applications cache
+ * it for far longer than the one-second TTL we answer with — across a tunnel
+ * restart, across minutes. Handing out slots in first-come order (idx = use++)
+ * meant every reconnect reshuffled the whole table, so an app still holding
+ * 198.18.0.3 silently started talking to whatever name landed on that slot this
+ * time. Measured on device: across one restart stun.parsec.app moved .3 -> .4
+ * while .3 became a different host, and Parsec — which had cached the old
+ * address — sent 111 STUN requests to the signalling server instead, got no
+ * answer, and reported "failed to connect Parsec STUN servers" [-6024].
+ *
+ * FNV-1a, then linear probing so a collision costs one name its determinism
+ * rather than failing. Slot 0 is skipped: it is the network address itself.
+ */
+static int
+hev_mapped_dns_slot (HevMappedDNS *self, const char *name)
+{
+    const int pool = self->max - 1;
+    uint32_t h = 2166136261u;
+    int start, i;
+
+    for (; *name; name++)
+        h = (h ^ (uint8_t)*name) * 16777619u;
+
+    start = (int)(h % (uint32_t)pool);
+    for (i = 0; i < pool; i++) {
+        int idx = 1 + ((start + i) % pool);
+
+        if (!self->records[idx])
+            return idx;
+    }
+
+    return -1;
+}
+
 static int
 hev_mapped_dns_find (HevMappedDNS *self, const char *name)
 {
     HevRBTreeNode **new = &self->tree.root, *parent = NULL;
     HevMappedDNSNode *node;
-    int idx = self->use;
+    int idx;
 
     while (*new) {
         int res;
@@ -128,7 +164,8 @@ hev_mapped_dns_find (HevMappedDNS *self, const char *name)
     hev_rbtree_insert_color (&self->tree, &node->tree);
     hev_list_add_tail (&self->list, &node->list);
 
-    if (self->use < self->max) {
+    idx = (self->use < self->max - 1) ? hev_mapped_dns_slot (self, name) : -1;
+    if (idx >= 0) {
         self->use++;
     } else {
         HevMappedDNSNode *nf;
@@ -136,8 +173,18 @@ hev_mapped_dns_find (HevMappedDNS *self, const char *name)
 
         nl = hev_list_first (&self->list);
         nf = container_of (nl, HevMappedDNSNode, list);
+        if (nf == node) {
+            /* The table is full of nothing but this brand-new node: impossible
+             * while max > 1, but never leave the reverse map pointing at freed
+             * memory if it ever were. */
+            hev_rbtree_erase (&self->tree, &node->tree);
+            hev_list_del (&self->list, &node->list);
+            hev_mapped_dns_node_free (node);
+            return -1;
+        }
 
         idx = nf->idx;
+        self->records[idx] = NULL;
         hev_rbtree_erase (&self->tree, &nf->tree);
         hev_list_del (&self->list, &nf->list);
         hev_mapped_dns_node_free (nf);
