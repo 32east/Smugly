@@ -43,6 +43,7 @@ object SubscriptionJson {
                 .put("webPageUrl", sub.info.webPageUrl)
                 .put("supportUrl", sub.info.supportUrl)
                 .put("announce", sub.info.announce)
+                .put("trafficReported", sub.info.trafficReported)
         )
 
     fun fromJson(json: JSONObject): Subscription? {
@@ -96,7 +97,10 @@ object SubscriptionJson {
                 expiresAtSeconds = info.optLong("expiresAtSeconds", 0),
                 webPageUrl = info.optString("webPageUrl"),
                 supportUrl = info.optString("supportUrl"),
-                announce = info.optString("announce")
+                announce = info.optString("announce"),
+                // Absent in records written before the flag existed; the counters in
+                // SubscriptionInfo.hasTraffic still cover those until the next refresh.
+                trafficReported = info.optBoolean("trafficReported", false)
             )
         )
     }

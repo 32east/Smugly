@@ -160,7 +160,15 @@ data class SubscriptionInfo(
     val expiresAtSeconds: Long = 0,
     val webPageUrl: String = "",
     val supportUrl: String = "",
-    val announce: String = ""
+    val announce: String = "",
+    /**
+     * The panel actually sent a `subscription-userinfo` line, whatever it said.
+     *
+     * Separate from the counters because "0 bytes used" and "no idea" are different answers and
+     * both arrive as zeroes. A paid plan that runs entirely over the tunnel protocols legitimately
+     * reports `download=0`, and hiding the line there reads as a missing feature.
+     */
+    val trafficReported: Boolean = false
 ) {
     val usedBytes: Long get() = uploadBytes + downloadBytes
     val hasQuota: Boolean get() = totalBytes > 0
@@ -169,12 +177,12 @@ data class SubscriptionInfo(
     /**
      * True when the panel actually said something about traffic.
      *
-     * A list that ships no `subscription-userinfo` header at all leaves every counter at 0, which
-     * is indistinguishable from a fresh plan — and "0 B used" under a plain config list is a number
-     * we do not have, so the card shows nothing instead. Any real quota or any consumed byte turns
-     * the line back on.
+     * A list that ships no `subscription-userinfo` header at all leaves every counter at 0, so the
+     * card shows nothing rather than a number we do not have. A panel that did send the header is
+     * taken at its word even when every counter is zero — [trafficReported] is what tells the two
+     * apart. Counters alone still switch the line on for records stored before that flag existed.
      */
-    val hasTraffic: Boolean get() = usedBytes > 0 || totalBytes > 0
+    val hasTraffic: Boolean get() = trafficReported || usedBytes > 0 || totalBytes > 0
 
     /** 0..1 of the quota consumed, or null when the plan is unlimited. */
     fun usedFraction(): Float? {

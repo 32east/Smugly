@@ -35,6 +35,28 @@ class SubscriptionParserTest {
         assertEquals(3, info.usedBytes)
     }
 
+    // A paid plan served entirely over the tunnel protocols reports genuine zeroes. The card has
+    // to tell that apart from a config list that never mentioned traffic, or the whole
+    // "Использовано" line silently disappears for those users.
+    @Test
+    fun zeroCountersStillCountAsReportedTraffic() {
+        val info = SubscriptionParser.parseUserInfo("upload=0; download=0; total=0; expire=1791140138")
+        assertEquals(0, info.usedBytes)
+        assertTrue(info.trafficReported)
+        assertTrue(info.hasTraffic)
+        assertFalse(info.hasQuota)
+        assertTrue(info.hasExpiry)
+    }
+
+    @Test
+    fun missingUserInfoReportsNoTraffic() {
+        for (raw in listOf("", "   ", "nonsense", "expire=1791140138")) {
+            val info = SubscriptionParser.parseUserInfo(raw)
+            assertFalse(info.trafficReported, "raw=$raw")
+            assertFalse(info.hasTraffic, "raw=$raw")
+        }
+    }
+
     @Test
     fun decodesQuotedAndBase64Text() {
         assertEquals("Name VPN", SubscriptionParser.decodeText("\"Name VPN\""))

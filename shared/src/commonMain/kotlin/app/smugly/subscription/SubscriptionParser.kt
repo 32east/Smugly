@@ -142,7 +142,8 @@ object SubscriptionParser {
             },
             webPageUrl = primary.info.webPageUrl.ifBlank { fallback.info.webPageUrl },
             supportUrl = primary.info.supportUrl.ifBlank { fallback.info.supportUrl },
-            announce = primary.info.announce.ifBlank { fallback.info.announce }
+            announce = primary.info.announce.ifBlank { fallback.info.announce },
+            trafficReported = primary.info.trafficReported || fallback.info.trafficReported
         )
     )
 
@@ -153,15 +154,18 @@ object SubscriptionParser {
         var download = 0L
         var total = 0L
         var expire = 0L
+        // Whether any counter key was actually understood, as opposed to a blank or unparseable
+        // header. `upload=0; download=0; total=0` is a real answer and must not read as silence.
+        var reported = false
         for (part in raw.split(';')) {
             val eq = part.indexOf('=')
             if (eq <= 0) continue
             val key = part.substring(0, eq).trim().lowercase()
             val value = part.substring(eq + 1).trim().toLongOrNull() ?: continue
             when (key) {
-                "upload" -> upload = value
-                "download" -> download = value
-                "total" -> total = value
+                "upload" -> { upload = value; reported = true }
+                "download" -> { download = value; reported = true }
+                "total" -> { total = value; reported = true }
                 "expire" -> expire = value
             }
         }
@@ -169,7 +173,8 @@ object SubscriptionParser {
             uploadBytes = upload,
             downloadBytes = download,
             totalBytes = total,
-            expiresAtSeconds = expire
+            expiresAtSeconds = expire,
+            trafficReported = reported
         )
     }
 
