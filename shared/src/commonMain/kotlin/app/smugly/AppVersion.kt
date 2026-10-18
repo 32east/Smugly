@@ -9,7 +9,7 @@ package app.smugly
  * hide a release or offer the running build back.
  */
 object AppVersion {
-    const val name = "0.1.1"
+    const val name = "0.1.2"
     /** ISO date this build was compiled — generated, never hand-edited (see BuildStamp.kt). */
     val buildDate: String get() = BUILD_STAMP_DATE
 

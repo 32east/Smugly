@@ -14,7 +14,7 @@ val minSdkVersion = 24
  * only the number the drawer prints — the in-app updater compares against what the package
  * manager reports, i.e. this one.
  */
-val appVersionName = "0.1.1"
+val appVersionName = "0.1.2"
 
 /**
  * Derived, never hand-written: Android refuses to install an APK whose versionCode is lower than
