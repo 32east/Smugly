@@ -119,7 +119,7 @@ object HevSocks5Tunnel {
         appendLine("  udp-copy-buffer-nums: 64")
 
         appendLine("  connect-timeout: 8000")
-        appendLine("  tcp-read-write-timeout: 120000")
+        appendLine("  tcp-read-write-timeout: 1800000")
         // After the SOCKS UDP ASSOCIATE handshake hev applies this timeout to the
         // whole session, including the silent TCP control socket. 15s then 90s both
         // killed live Parsec associates (2026-08-15: 9cc8dac3 closed at 95s with

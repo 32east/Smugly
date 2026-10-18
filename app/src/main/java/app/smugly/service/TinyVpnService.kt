@@ -17,6 +17,7 @@ import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.os.ParcelFileDescriptor
+import android.os.PowerManager
 import android.os.Process
 import android.os.SystemClock
 import app.smugly.tunnel.HevSocks5Tunnel
@@ -63,6 +64,8 @@ class TinyVpnService : VpnService() {
     private var notificationRxLast = 0L
     private var notificationTxLast = 0L
     private var notificationSampleAt = 0L
+    private var notificationTextLast: String? = null
+    private var lightDiagLoggedAt = 0L
     private var lastRx = 0L
     private var lastTx = 0L
     private var lastTunRx = 0L
@@ -592,14 +595,16 @@ class TinyVpnService : VpnService() {
         val hev = HevSocks5Tunnel.stats()
         maybeUpdateTrafficNotification(hev.rxBytes, hev.txBytes)
         val running = XrayBridge.isRunning()
-        // queryStats RESETS the counters, so these are per-interval deltas.
-        val up = XrayBridge.queryStats(XrayConfigBuilder.PROXY_TAG, XrayBridge.UPLINK)
-        val down = XrayBridge.queryStats(XrayConfigBuilder.PROXY_TAG, XrayBridge.DOWNLINK)
-        AppLog.i(
-            TAG,
-            "diag[xray] running=$running hevRunning=${HevSocks5Tunnel.isRunning()} " +
-                "tunRx=${hev.rxBytes} tunTx=${hev.txBytes} proxyUp=$up proxyDown=$down"
-        )
+        if (shouldLogLightDiagnostics()) {
+            // queryStats RESETS the counters, so these are per-interval deltas.
+            val up = XrayBridge.queryStats(XrayConfigBuilder.PROXY_TAG, XrayBridge.UPLINK)
+            val down = XrayBridge.queryStats(XrayConfigBuilder.PROXY_TAG, XrayBridge.DOWNLINK)
+            AppLog.i(
+                TAG,
+                "diag[xray] running=$running hevRunning=${HevSocks5Tunnel.isRunning()} " +
+                    "tunRx=${hev.rxBytes} tunTx=${hev.txBytes} proxyUp=$up proxyDown=$down"
+            )
+        }
         if (!running && tunnelActive) {
             AppLog.w(TAG, "xray core stopped while tunnel active; lastError=${XrayBridge.lastError() ?: "none"}")
         }
@@ -693,11 +698,13 @@ class TinyVpnService : VpnService() {
         val hev = HevSocks5Tunnel.stats()
         maybeUpdateTrafficNotification(hev.rxBytes, hev.txBytes)
         val running = S3fuBridge.isRunning()
-        AppLog.i(
-            TAG,
-            "diag[s3fu] running=$running hevRunning=${HevSocks5Tunnel.isRunning()} " +
-                "tunRx=${hev.rxBytes} tunTx=${hev.txBytes}"
-        )
+        if (shouldLogLightDiagnostics()) {
+            AppLog.i(
+                TAG,
+                "diag[s3fu] running=$running hevRunning=${HevSocks5Tunnel.isRunning()} " +
+                    "tunRx=${hev.rxBytes} tunTx=${hev.txBytes}"
+            )
+        }
         if (!running && tunnelActive) {
             AppLog.w(TAG, "s3fu client stopped while tunnel active; lastError=${S3fuBridge.lastError() ?: "none"}")
         }
@@ -708,11 +715,13 @@ class TinyVpnService : VpnService() {
         val hev = HevSocks5Tunnel.stats()
         maybeUpdateTrafficNotification(hev.rxBytes, hev.txBytes)
         val running = CdnfuBridge.isRunning()
-        AppLog.i(
-            TAG,
-            "diag[cdnfu] running=$running hevRunning=${HevSocks5Tunnel.isRunning()} " +
-                "tunRx=${hev.rxBytes} tunTx=${hev.txBytes}"
-        )
+        if (shouldLogLightDiagnostics()) {
+            AppLog.i(
+                TAG,
+                "diag[cdnfu] running=$running hevRunning=${HevSocks5Tunnel.isRunning()} " +
+                    "tunRx=${hev.rxBytes} tunTx=${hev.txBytes}"
+            )
+        }
         if (!running && tunnelActive) {
             AppLog.w(TAG, "cdnfu client stopped while tunnel active; lastError=${CdnfuBridge.lastError() ?: "none"}")
         }
@@ -876,6 +885,7 @@ class TinyVpnService : VpnService() {
         notificationRxLast = 0
         notificationTxLast = 0
         notificationSampleAt = 0
+        notificationTextLast = null
         lastRx = 0
         lastTx = 0
         lastTunRx = 0
@@ -1801,8 +1811,23 @@ class TinyVpnService : VpnService() {
         notificationRxLast = rx
         notificationTxLast = tx
         notificationSampleAt = now
+        if (!force && !isScreenInteractive()) return
         val text = "↓ ${formatBytes(rx)} (${formatRate(downRate)})   ↑ ${formatBytes(tx)} (${formatRate(upRate)})"
+        if (!force && text == notificationTextLast) return
+        notificationTextLast = text
         startForeground(1, notification(t(S.STATUS_CONNECTED), text))
+    }
+
+    private fun isScreenInteractive(): Boolean =
+        runCatching { getSystemService(PowerManager::class.java)?.isInteractive }.getOrNull() ?: true
+
+    private fun shouldLogLightDiagnostics(): Boolean {
+        val now = SystemClock.elapsedRealtime()
+        if (isScreenInteractive() || now - lightDiagLoggedAt >= LIGHT_DIAG_SCREEN_OFF_INTERVAL_MS) {
+            lightDiagLoggedAt = now
+            return true
+        }
+        return false
     }
 
     private fun notification(title: String, text: String): Notification {
@@ -1883,6 +1908,7 @@ class TinyVpnService : VpnService() {
         private const val VPN_DNS_PRIMARY = "1.1.1.1"
         private const val VPN_DNS_SECONDARY = "8.8.8.8"
         private const val DIAGNOSTICS_INTERVAL_MS = 5_000L
+        private const val LIGHT_DIAG_SCREEN_OFF_INTERVAL_MS = 60_000L
         private const val READY_RECOVERY_MS = 3_000L
         private const val READY_RECOVERY_AFTER_UPLOAD_MS = 3_000L
         private const val TRAFFIC_RECOVERY_MS = 15_000L
