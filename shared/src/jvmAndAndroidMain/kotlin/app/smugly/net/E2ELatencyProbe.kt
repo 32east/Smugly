@@ -38,6 +38,7 @@ object E2ELatencyProbe {
     private const val PROBE_PATH = "/generate_204"
 
     private const val REQUEST_TIMEOUT_MS = 10_000
+    private const val SLOW_ROUND_TRIP_MS = 2_000
 
     /**
      * Probes run on a small pool because "measure the whole folder" fires one per profile, and each
@@ -73,6 +74,8 @@ object E2ELatencyProbe {
 
         /** How long that engine may take to become usable. */
         fun readyTimeoutMs(protocol: Config.TunnelProtocol): Long = 15_000
+
+        fun variants(config: Config): List<Config> = listOf(config)
     }
 
     /** Run [config]'s probe on the shared pool; [onResult] fires on a probe thread. */
@@ -92,12 +95,28 @@ object E2ELatencyProbe {
             )
             return LatencyProbe.measure(config)
         }
+        var best: Int? = null
+        var failure: Throwable? = null
+        for (variant in launcher.variants(config).ifEmpty { listOf(config) }) {
+            measureOnce(variant, launcher)
+                .onSuccess { ms -> best = minOf(best ?: ms, ms) }
+                .onFailure { failure = it }
+            if ((best ?: Int.MAX_VALUE) <= SLOW_ROUND_TRIP_MS) break
+        }
+        return best?.let { Result.success(it) }
+            ?: Result.failure(failure ?: IllegalStateException("the profile could not be started"))
+    }
+
+    private fun measureOnce(config: Config, launcher: Launcher): Result<Int> {
         val port = freeLocalPort()
         return runCatching {
             launcher.launch(config, port).use { session ->
                 val readyTimeout = launcher.readyTimeoutMs(config.protocol)
                 if (!session.awaitReady(readyTimeout)) {
                     error("the tunnel did not come up within ${readyTimeout / 1000}s")
+                }
+                if (opensSessionOnFirstUse(config.protocol)) {
+                    requestRoundTripMs(config, port)
                 }
                 val ms = requestRoundTripMs(config, port)
                 PlatformLog.log(LogLevel.INFO, TAG, "${config.protocol} e2e latency ${ms}ms")
@@ -143,6 +162,9 @@ object E2ELatencyProbe {
             return elapsedMs(started)
         }
     }
+
+    private fun opensSessionOnFirstUse(protocol: Config.TunnelProtocol): Boolean =
+        protocol == Config.TunnelProtocol.S3FU || protocol == Config.TunnelProtocol.CDNFU
 
     private fun readStatusLine(input: InputStream): String {
         val line = StringBuilder(64)

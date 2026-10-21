@@ -158,13 +158,15 @@ object XrayConfigBuilder {
     const val PROXY_TAG = "proxy"
 
     /** Xray user level the generated policy block is written for. */
-    private const val USER_LEVEL = 8
+    internal const val USER_LEVEL = 8
 
     /**
      * Render a complete Xray config for [link], with a SOCKS inbound on
      * 127.0.0.1:[socksPort] for the tun2socks bridge to attach to.
      */
-    fun build(link: VlessLink, socksPort: Int): String {
+    fun build(link: VlessLink, socksPort: Int): String = buildWithProxy(vlessOutbound(link), socksPort)
+
+    internal fun buildWithProxy(proxy: JSONObject, socksPort: Int): String {
         val root = JSONObject()
             .put("log", JSONObject().put("loglevel", "warning"))
             .put("stats", JSONObject())
@@ -193,7 +195,7 @@ object XrayConfigBuilder {
             .put(
                 "outbounds",
                 JSONArray()
-                    .put(vlessOutbound(link))
+                    .put(proxy)
                     .put(JSONObject().put("tag", "direct").put("protocol", "freedom").put("settings", JSONObject()))
                     .put(
                         JSONObject()
@@ -247,13 +249,15 @@ object XrayConfigBuilder {
      * Returns the original text unchanged when it is not parseable JSON -- the
      * caller surfaces the parse error from Xray itself.
      */
-    fun withSocksPort(configJson: String, socksPort: Int): String {
+    fun listenAddress(allowLan: Boolean): String = if (allowLan) "0.0.0.0" else "127.0.0.1"
+
+    fun withSocksPort(configJson: String, socksPort: Int, listen: String = "127.0.0.1"): String {
         val root = runCatching { JSONObject(configJson) }.getOrNull() ?: return configJson
         val inbounds = root.optJSONArray("inbounds") ?: JSONArray().also { root.put("inbounds", it) }
         for (i in 0 until inbounds.length()) {
             val inbound = inbounds.optJSONObject(i) ?: continue
             if (!inbound.optString("protocol").equals("socks", ignoreCase = true)) continue
-            inbound.put("listen", "127.0.0.1").put("port", socksPort)
+            inbound.put("listen", listen).put("port", socksPort)
             // Force no-auth too. Panel configs routinely ship this inbound with
             // `auth: "password"` + accounts for desktop clients, and the TUN bridge that dials it
             // is ours and offers no credentials — Xray then rejects every single connection with
@@ -264,7 +268,7 @@ object XrayConfigBuilder {
             settings.remove("accounts")
             return root.toString(2)
         }
-        inbounds.put(socksInbound(socksPort))
+        inbounds.put(socksInbound(socksPort).put("listen", listen))
         return root.toString(2)
     }
 
@@ -292,20 +296,20 @@ object XrayConfigBuilder {
      * all. Through the proxy the app sends `CONNECT host:port`, and the host name reaches the
      * routing rules — which is the only reason those addresses can work.
      */
-    fun withHttpPort(configJson: String, httpPort: Int): String {
+    fun withHttpPort(configJson: String, httpPort: Int, listen: String = "127.0.0.1"): String {
         val root = runCatching { JSONObject(configJson) }.getOrNull() ?: return configJson
         val inbounds = root.optJSONArray("inbounds") ?: JSONArray().also { root.put("inbounds", it) }
         for (i in 0 until inbounds.length()) {
             val inbound = inbounds.optJSONObject(i) ?: continue
             if (!inbound.optString("protocol").equals("http", ignoreCase = true)) continue
-            inbound.put("listen", "127.0.0.1").put("port", httpPort)
+            inbound.put("listen", listen).put("port", httpPort)
             // Same reason as the SOCKS inbound: panel configs ship accounts for desktop clients,
             // and the apps dialling this one have no credentials to offer.
             inbound.optJSONObject("settings")?.remove("accounts")
             if (!inbound.has("sniffing")) inbound.put("sniffing", sniffing())
             return root.toString(2)
         }
-        inbounds.put(httpInbound(httpPort))
+        inbounds.put(httpInbound(httpPort).put("listen", listen))
         return root.toString(2)
     }
 
@@ -388,7 +392,7 @@ object XrayConfigBuilder {
             .put("destOverride", JSONArray().put("http").put("tls").put("quic"))
             .put("routeOnly", false)
 
-    private fun vlessOutbound(link: VlessLink): JSONObject {
+    internal fun vlessOutbound(link: VlessLink): JSONObject {
         // Flat form (address/port/id/... directly under settings); Xray rewrites it
         // into a single-member vnext internally. See infra/conf/vless.go.
         val settings = JSONObject()
@@ -407,7 +411,7 @@ object XrayConfigBuilder {
             .put("mux", JSONObject().put("enabled", false).put("concurrency", -1))
     }
 
-    private fun streamSettings(link: VlessLink): JSONObject {
+    internal fun streamSettings(link: VlessLink): JSONObject {
         val stream = JSONObject().put("network", link.network)
         val transportSni = populateTransport(stream, link)
         populateSecurity(stream, link, transportSni)
@@ -425,6 +429,7 @@ object XrayConfigBuilder {
                 val header = JSONObject()
                 if (link.headerType == "http") {
                     header.put("type", "http").put("request", tcpHttpRequest(link.host, link.path))
+                    stream.put("rawSettings", JSONObject().put("header", header))
                     return link.host?.split(",")?.firstOrNull()?.trim()
                 }
                 header.put("type", "none")
@@ -478,10 +483,10 @@ object XrayConfigBuilder {
             }
 
             "kcp", "mkcp" -> {
-                val kcp = JSONObject().put(
-                    "header",
-                    JSONObject().put("type", link.headerType?.takeIf { it.isNotBlank() } ?: "none")
-                )
+                val kcp = JSONObject()
+                link.headerType?.takeIf { it.isNotBlank() && it != "none" }?.let {
+                    kcp.put("header", JSONObject().put("type", it))
+                }
                 link.seed?.let { kcp.put("seed", it) }
                 stream.put("kcpSettings", kcp)
                 return null

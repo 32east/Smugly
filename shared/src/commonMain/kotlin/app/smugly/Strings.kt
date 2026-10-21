@@ -1,12 +1,19 @@
 package app.smugly
 
+import androidx.compose.runtime.mutableStateOf
+
 /**
  * In-app localization used by Compose Multiplatform UI and Android Views.
  * Resolved language never stays as SYSTEM — [set] expands it.
  */
 object Strings {
-    var current: AppLanguage = AppLanguage.EN
-        private set
+    private val language = mutableStateOf(AppLanguage.EN)
+
+    var current: AppLanguage
+        get() = language.value
+        private set(value) {
+            language.value = value
+        }
 
     fun set(preference: AppLanguage) {
         current = resolve(preference)
@@ -32,8 +39,70 @@ fun dnsProbingText(current: Int, total: Int): String =
     if (Strings.current == AppLanguage.RU) "Поиск DNS $current/$total" else "DNS probing $current/$total"
 
 enum class S(val en: String, val ru: String) {
+    APP_NAME("Smugly", "Смугли"),
     // Screens / drawer / section titles
-    HOME("Home", "Главное"),
+    HOME("Home", "Главная"),
+    WEB_CABINET("My account", "Веб-кабинет"),
+    WELCOME_TITLE("Welcome to Smugly", "Добро пожаловать в Смугли"),
+    WELCOME_TEXT(
+        "To connect, you need a subscription.\nIt takes a minute.",
+        "Чтобы подключиться, нужна подписка.\nЭто займёт минуту."
+    ),
+    BUY_SUBSCRIPTION("Get a subscription", "Приобрести подписку"),
+    HAVE_ACCOUNT_SIGN_IN("Already have an account? Sign in", "Уже есть аккаунт? Войти"),
+    ACCOUNT_NO_PLAN_TITLE("No active subscription", "Подписка не активна"),
+    ACCOUNT_NO_PLAN_TEXT(
+        "Buy a subscription in your account — it will appear here by itself.",
+        "Оформите подписку в веб-кабинете — она сама появится здесь."
+    ),
+    ACCOUNT_TRIAL_NEEDS_TELEGRAM(
+        "The free trial unlocks after you link Telegram in your account.",
+        "Бесплатный период откроется после привязки Telegram в веб-кабинете."
+    ),
+    ACCOUNT_SIGNED_IN_AS("Signed in as", "Вы вошли как"),
+    ACCOUNT_PREPARING("Getting your subscription ready…", "Готовим вашу подписку…"),
+    ACCOUNT_SECTION("Account", "Аккаунт"),
+    SIGN_IN_BTN("Sign in", "Войти"),
+    SIGN_OUT_BTN("Sign out", "Выйти из аккаунта"),
+    SIGN_OUT_SHORT("Sign out", "Выйти"),
+    ACCOUNT_NOT_SIGNED_IN("Not signed in", "Вы не авторизованы"),
+    SIGN_OUT_TITLE("Sign out?", "Выйти из аккаунта?"),
+    SIGN_OUT_MESSAGE(
+        "The subscription folder will disappear from the app.",
+        "Папка с подпиской пропадёт из приложения."
+    ),
+    LINK_WAITING_TITLE("Continue in the browser", "Продолжите в браузере"),
+    LINK_WAITING_TEXT(
+        "Sign in or register on the page that just opened. The app will pick everything up by itself.",
+        "Войдите или зарегистрируйтесь на открывшейся странице. Приложение всё подхватит само."
+    ),
+    LINK_REOPEN_BTN("Open again", "Открыть ещё раз"),
+    SUBSCRIPTION_TRIAL("Free trial", "Пробный период"),
+    EXTEND_SUBSCRIPTION_BTN("Extend subscription", "Продлить подписку"),
+    BUY_FULL_SUBSCRIPTION_BTN("Buy a subscription", "Купить подписку"),
+    TOAST_ACCOUNT_SIGNED_IN("Signed in", "Вы вошли в аккаунт"),
+    TOAST_SUBSCRIPTION_READY("Subscription synced successfully", "Подписка была успешно синхронизирована"),
+    TOAST_ACCESS_REISSUED(
+        "Access reissued and already imported into the app",
+        "Доступы выпущены и уже импортированы в приложение"
+    ),
+    TOAST_ACCOUNT_GONE("Account not found — sign in again", "Аккаунт не найден — войдите снова"),
+    TOAST_ACCOUNT_BANNED("This account is blocked", "Аккаунт заблокирован"),
+    TOAST_SESSION_EXPIRED("Session expired — sign in again", "Сессия истекла — войдите снова"),
+    TOAST_SIGNED_OUT("Signed out", "Вы вышли из аккаунта"),
+    TOAST_SERVER_UNREACHABLE(
+        "Could not reach the server. Check the internet and try again",
+        "Не удалось связаться с сервером. Проверьте интернет и попробуйте ещё раз"
+    ),
+    TOAST_LINK_EXPIRED("Sign-in timed out — try again", "Время на вход вышло — попробуйте ещё раз"),
+    SETTINGS_ADVANCED_WARNING_TITLE("Advanced settings", "Дополнительные настройки"),
+    SETTINGS_ADVANCED_WARNING(
+        "Changing these settings is strongly discouraged. The Smugly developers and the service providers are not responsible for the consequences of any changes!",
+        "Данные настройки настоятельно не рекомендуется изменять. Разработчики Смугли, а также владельцы сервис-провайдеров не несут ответственности за последствия изменений!"
+    ),
+    CONTINUE_BTN("Continue", "Продолжить"),
+    ACCOUNT_CONNECTING("Connecting to the server…", "Соединяемся с сервером…"),
+    ACCOUNT_SIGNING_OUT("Signing out…", "Выходим из аккаунта…"),
     DIAGNOSTICS("Diagnostics", "Диагностика"),
     SETTINGS("Settings", "Настройки"),
     // Short on purpose: the drawer panel is 280dp wide and a longer name wraps to two lines
@@ -86,6 +155,42 @@ enum class S(val en: String, val ru: String) {
     XRAY_FORMAT_BTN("FORMAT", "ФОРМАТИРОВАТЬ"),
     XRAY_VALIDATE_BTN("CHECK", "ПРОВЕРИТЬ"),
     XRAY_CORE_VERSION("Xray-core", "Xray-core"),
+    XRAY_INPUT("Configuration", "Конфигурация"),
+    XRAY_INPUT_MANUAL("Manual", "Вручную"),
+    XRAY_PROTOCOL("Xray protocol", "Протокол Xray"),
+    XRAY_ADDRESS("Server address", "Адрес сервера"),
+    XRAY_UUID("UUID", "UUID"),
+    XRAY_FLOW("Flow", "Поток"),
+    XRAY_ENCRYPTION("Encryption", "Шифрование"),
+    XRAY_SS_METHOD("Method", "Метод"),
+    XRAY_NETWORK("Network", "Сеть"),
+    XRAY_HEADER_TYPE("Header type", "Тип заголовка"),
+    XRAY_HOST("Host", "Хост"),
+    XRAY_PATH("Path", "Путь"),
+    XRAY_XHTTP_MODE("XHTTP mode", "Режим XHTTP"),
+    XRAY_SERVICE_NAME("Service name", "Имя сервиса"),
+    XRAY_AUTHORITY("Authority", "Authority"),
+    XRAY_GRPC_MODE("gRPC mode", "Режим gRPC"),
+    XRAY_SECURITY("Security", "Безопасность"),
+    XRAY_SECURITY_NONE("None", "Нет"),
+    XRAY_SNI("SNI", "SNI"),
+    XRAY_FINGERPRINT("Fingerprint", "Отпечаток"),
+    XRAY_ALPN("ALPN", "ALPN"),
+    XRAY_PUBLIC_KEY("Public key", "Публичный ключ"),
+    XRAY_SHORT_ID("Short ID", "Short ID"),
+    XRAY_SPIDER_X("SpiderX", "SpiderX"),
+    XRAY_NOT_SET("Not set", "Не выбрано"),
+    TOAST_XRAY_NEED_ADDRESS("Enter the server address", "Укажите адрес сервера"),
+    TOAST_XRAY_NEED_PORT("Enter a port from 1 to 65535", "Укажите порт от 1 до 65535"),
+    TOAST_XRAY_NEED_UUID("Enter the UUID", "Укажите UUID"),
+    TOAST_XRAY_NEED_PASSWORD("Enter the password", "Укажите пароль"),
+    TOAST_XRAY_NEED_PUBLIC_KEY("Enter the REALITY public key", "Укажите публичный ключ REALITY"),
+    EDITOR_SECTION_SERVER("Server", "Сервер"),
+    EDITOR_SECTION_ADVANCED("Advanced", "Дополнительно"),
+    FIELD_MODE("Mode", "Режим"),
+    FIELD_ADDRESS("Address", "Адрес"),
+    FIELD_PORT("Port", "Порт"),
+    LOCAL_RESOLVER_BTN("Local", "Локальный"),
 
     // Field labels
     LOCAL_PORT("Local port", "Локальный порт"),
@@ -105,12 +210,13 @@ enum class S(val en: String, val ru: String) {
     PASSWORD("Password", "Пароль"),
     DNS_LABEL_LENGTH("DNS label length", "Длина DNS-метки"),
     DNS_LABEL_LENGTH_JITTER("DNS label length jitter", "Джиттер длины DNS-метки"),
-    MAX_POLL_RATE("Max download polls (queries/sec)", "Макс. download-опросы (запросов/сек)"),
-    MAX_DATA_RATE("Max upload data (queries/sec)", "Макс. upload data (запросов/сек)"),
+    MAX_POLL_RATE("Download polls per second", "Опросов download в секунду"),
+    MAX_DATA_RATE("Upload queries per second", "Запросов upload в секунду"),
     MAX_ACTIVE_CONNECTIONS("Max active connections", "Макс. активных соединений"),
     SOCKS_USERNAME("SOCKS username", "Логин SOCKS"),
     SOCKS_PASSWORD("SOCKS password", "Пароль SOCKS"),
-    DNS_RESOLVER_POOL("DNS resolver pool (Slipstream)", "Пул DNS-резолверов (Slipstream)"),
+    DNS_RESOLVER_POOL("DNS resolver pool", "Пул DNS-резолверов"),
+    DNS_RESOLVER_POOL_HINT("One per line", "По одному на строку"),
 
     // Pill / spinner option labels
     DNS_MODE_MANUAL("manual dns", "ручной DNS"),
@@ -139,44 +245,6 @@ enum class S(val en: String, val ru: String) {
     CREATE_PROFILE_BTN("CREATE PROFILE", "СОЗДАТЬ ПРОФИЛЬ"),
     SAVE_PROFILE_BTN("SAVE PROFILE", "СОХРАНИТЬ ПРОФИЛЬ"),
     BACK_BTN("BACK", "НАЗАД"),
-
-    // Hint texts
-    HINT_TRANSPORT_AUTO(
-        "Auto DNS measures UDP and TCP on connect and keeps whichever actually carries data on this operator, so there is nothing to pick here. Switch to manual DNS to force one.",
-        "Авто DNS при подключении замеряет UDP и TCP и оставляет тот, который реально везёт данные у этого оператора, — выбирать нечего. Нужен конкретный: переключитесь на ручной DNS."
-    ),
-    HINT_DNS_QUERY_TYPE(
-        "Some resolvers filter specific answer types; null is less likely to be blocked but carries less data per round trip. The server must accept the same type.",
-        "Некоторые резолверы фильтруют определённые типы ответов; null реже блокируется, но несёт меньше данных за один цикл обмена. Сервер должен принимать тот же тип."
-    ),
-    HINT_ADVANCED_CLIENT_ONLY(
-        "These only shape this device's own traffic; the server does not need to match them.",
-        "Эти параметры влияют только на трафик этого устройства; сервер не обязан их повторять."
-    ),
-    HINT_DNS_LABEL_LENGTH(
-        "1-63, default 57. Length of each DNS label in the encoded query.",
-        "1-63, по умолчанию 57. Длина каждой DNS-метки в закодированном запросе."
-    ),
-    HINT_DNS_LABEL_LENGTH_JITTER(
-        "0 = off. Default 4: randomizes each query's label length (within [len-jitter, len]) so labels aren't all identical -- harder to fingerprint. Small values barely affect speed; higher masks more but slightly lowers MTU.",
-        "0 = выкл. По умолчанию 4: случайно меняет длину метки в каждом запросе (в диапазоне [длина-джиттер, длина]), чтобы метки не были одинаковыми — сложнее распознать по сигнатуре. Малые значения почти не влияют на скорость; большие лучше маскируют, но чуть снижают MTU."
-    ),
-    HINT_MAX_POLL_QPS(
-        "0 = unlimited. Empty DNS polls that pull DOWNLOAD (and MAX_STREAM_DATA). Separate from upload. Default 1400; ~400+ kept during upload so download is not starved.",
-        "0 = без лимита. Пустые DNS-опросы, которые тянут DOWNLOAD (и MAX_STREAM_DATA). Отдельно от upload. По умолчанию 1400; во время аплоада оставляем ≥~400, чтобы download не умирал."
-    ),
-    HINT_MAX_DATA_QPS(
-        "0 = unlimited. Data-bearing DNS queries = UPLOAD only. Default 800. Lower if chat dies under load; higher for faster files. Does not limit download polls.",
-        "0 = без лимита. Data-DNS = только UPLOAD. По умолчанию 800. Меньше — если чат падает; больше — быстрее файлы. Download-опросы не ограничивает."
-    ),
-    HINT_MAX_ACTIVE_CLIENTS(
-        "Default 40. Lower it (e.g. 4-6) on operators that hard-limit DNS query rate, so the query budget isn't split across too many connections.",
-        "По умолчанию 40. Уменьшите (например, до 4-6) у операторов с жёстким лимитом на частоту DNS-запросов, чтобы бюджет запросов не дробился между слишком многими соединениями."
-    ),
-    HINT_BASE64U(
-        "~20% denser than the default base32, so fewer round trips per byte -- but case-sensitive. Only enable once you've confirmed your resolver path preserves label case; a resolver that lowercases/uppercases names will silently corrupt the tunnel instead of just failing.",
-        "Примерно на 20% плотнее стандартного base32, то есть меньше циклов обмена на байт -- но чувствительно к регистру. Включайте только убедившись, что путь резолвера сохраняет регистр меток; резолвер, приводящий имена к одному регистру, незаметно повредит туннель вместо явной ошибки."
-    ),
 
     // Content descriptions (accessibility)
     CD_MENU("Menu", "Меню"),
@@ -213,7 +281,7 @@ enum class S(val en: String, val ru: String) {
     BACKGROUND_WORK_TITLE("Background work", "Работа в фоне"),
     BACKGROUND_WORK_MESSAGE(
         "Allow Smugly to keep working in the background if your Android skin shows such an option.",
-        "Разрешите Smugly работать в фоне, если ваша оболочка Android показывает такую опцию."
+        "Разрешите Смугли работать в фоне, если ваша оболочка Android показывает такую опцию."
     ),
     OPEN_SETTINGS_BTN("Open settings", "Открыть настройки"),
     LATER_BTN("Later", "Позже"),
@@ -268,7 +336,37 @@ enum class S(val en: String, val ru: String) {
         "There are no VPN configurations here",
         "Здесь нет VPN-конфигураций"
     ),
-    APP_HTTP_PROXY("HTTP proxy for apps (Xray)", "HTTP-прокси для приложений (Xray)"),
+    APP_HTTP_PROXY("HTTP proxy for apps", "HTTP-прокси для приложений"),
+    APP_HTTP_PROXY_HINT("Needed for .onion and .i2p", "Нужен для .onion и .i2p"),
+    SETTINGS_SECTION_GENERAL("General", "Основные"),
+    SETTINGS_SECTION_CONNECTION("Connection", "Подключение"),
+    SETTINGS_SECTION_TUNNEL("Tunnel", "Туннель"),
+    SETTINGS_SECTION_XRAY("Xray", "Xray"),
+    SETTINGS_SECTION_LOCAL_PROXY("Local proxy", "Локальный прокси"),
+    SETTINGS_SECTION_SLIPSTREAM("Slipstream", "Slipstream"),
+    SETTINGS_SECTION_DEBUG("Debugging", "Отладка"),
+    DEBUG_MODE_HINT("Keeps a log for Diagnostics", "Пишет журнал для «Диагностики»"),
+    AUTO_CONNECT_ON_BOOT("Connect when the device starts", "Подключаться при включении устройства"),
+    TUN_MTU("MTU", "MTU"),
+    TUN_MTU_RANGE("from 1280 to 9000", "от 1280 до 9000"),
+    TUN_IPV6("Send IPv6 through the tunnel", "Пускать IPv6 через туннель"),
+    TUN_BYPASS_LAN("Keep the local network out of the tunnel", "Не пускать локальную сеть в туннель"),
+    TUN_DNS("DNS servers", "DNS-серверы"),
+    TUN_DNS_HINT("Comma-separated", "Через запятую"),
+    TUN_DNS_INVALID("Not an IP address", "Не IP-адрес"),
+    ROUTE_DIRECT_RU("Russian sites go direct", "Российские сайты напрямую"),
+    ROUTE_BLOCK_ADS("Block ads", "Блокировать рекламу"),
+    ALLOW_LAN("Allow connections from the local network", "Разрешить подключения из локальной сети"),
+    ALLOW_LAN_HINT("Other devices on the network can use this proxy", "Другие устройства в сети смогут ходить через этот прокси"),
+    RESET_SETTINGS_BTN("Reset settings", "Сбросить настройки"),
+    RESET_SETTINGS_TITLE("Reset settings?", "Сбросить настройки?"),
+    RESET_SETTINGS_TEXT(
+        "Everything on this screen returns to its default. Profiles, subscriptions and the account stay.",
+        "Всё на этом экране вернётся к значениям по умолчанию. Профили, подписки и аккаунт останутся."
+    ),
+    RESET_BTN("Reset", "Сбросить"),
+    TOAST_SETTINGS_RESET("settings reset", "настройки сброшены"),
+    TOAST_SETTINGS_RECONNECT("reconnect to apply", "переподключитесь, чтобы применить"),
     RENAME_FOLDER("Rename", "Переименовать"),
     EDIT_FOLDER("Edit", "Редактировать"),
     FOLDER_NEW_TITLE("New folder", "Новая папка"),
@@ -280,10 +378,6 @@ enum class S(val en: String, val ru: String) {
     FOLDER_SOURCE_EMPTY("Empty", "Пустая"),
     FOLDER_SOURCE_LINK("From link", "Из ссылки"),
     FOLDER_SOURCE_FILE("From file", "Из файла"),
-    FOLDER_SOURCE_FILE_HINT(
-        "Pick a subscription file or a list of configs. Servers land in a new folder.",
-        "Выберите файл подписки или список конфигов. Серверы попадут в новую папку."
-    ),
     FOLDER_PICK_FILE_BTN("Choose file", "Выбрать файл"),
     FOLDER_URL("Subscription link", "Ссылка на подписку"),
     FOLDER_UPDATES_ENABLED("Allow updating", "Разрешить обновление"),
@@ -337,14 +431,12 @@ enum class S(val en: String, val ru: String) {
         "Nothing is selected, so all apps keep going through the tunnel. Pick at least one app.",
         "Ничего не выбрано, поэтому через туннель пока идут все приложения. Выберите хотя бы одно."
     ),
-    PER_APP_APPLIES_ON_RECONNECT(
-        "Changes take effect on the next connect.",
-        "Изменения применятся при следующем подключении."
-    ),
     PER_APP_SEARCH_HINT("Search apps", "Поиск приложений"),
     PER_APP_SHOW_SYSTEM("Show system apps", "Показывать системные приложения"),
+    PER_APP_SECTION_SELECTED("Selected", "Выбранные"),
+    PER_APP_SECTION_APPS("Apps", "Приложения"),
+    PER_APP_SEARCH_CLEAR("Clear search", "Очистить поиск"),
     PER_APP_CLEAR("Clear", "Снять все"),
-    PER_APP_LOADING("Loading apps…", "Загружаем приложения…"),
     PER_APP_NOTHING_FOUND("Nothing found", "Ничего не найдено"),
     TOAST_PER_APP_RECONNECT(
         "reconnect to apply",
@@ -354,7 +446,8 @@ enum class S(val en: String, val ru: String) {
     // In-app updates (GitHub releases)
     UPDATES_SECTION("Updates", "Обновления"),
     UPDATE_AUTO("Check for updates automatically", "Проверять обновления автоматически"),
-    UPDATE_CHECK_BTN("Check for updates", "Проверить обновления"),
+    UPDATE_CHECK_BTN("Check", "Проверить"),
+    UPDATE_CHECKING("Checking…", "Проверяем…"),
     UPDATE_CURRENT_VERSION("Installed version", "Установленная версия"),
     UPDATE_AVAILABLE_TITLE("Update available", "Доступно обновление"),
     UPDATE_DOWNLOADING("Downloading…", "Загружаем…"),
@@ -393,4 +486,16 @@ fun profilesImportedText(count: Int): String = if (Strings.current == AppLanguag
     "импортировано $count $plural"
 } else {
     if (count == 1) "1 profile imported" else "$count profiles imported"
+}
+
+fun trialDaysText(days: Int): String = if (Strings.current == AppLanguage.RU) {
+    val plural = when {
+        days % 100 in 11..14 -> "дней"
+        days % 10 == 1 -> "день"
+        days % 10 in 2..4 -> "дня"
+        else -> "дней"
+    }
+    "Первые $days $plural — бесплатно"
+} else {
+    if (days == 1) "The first day is free" else "The first $days days are free"
 }

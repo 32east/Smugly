@@ -38,7 +38,10 @@ import app.smugly.R
 import app.smugly.ResolverChoice
 import app.smugly.ResolverSelector
 import app.smugly.S
+import app.smugly.TunPlan
+import app.smugly.TunSettings
 import app.smugly.XrayConfigBuilder
+import app.smugly.XrayRouting
 import app.smugly.t
 
 class TinyVpnService : VpnService() {
@@ -66,6 +69,11 @@ class TinyVpnService : VpnService() {
     private var notificationSampleAt = 0L
     private var notificationTextLast: String? = null
     private var lightDiagLoggedAt = 0L
+    private var lightDiagRx = 0L
+    private var lightDiagTx = 0L
+    private var lightSampleAt = 0L
+    private var lightSampleRx = 0L
+    private var lightSampleTx = 0L
     private var lastRx = 0L
     private var lastTx = 0L
     private var lastTunRx = 0L
@@ -121,7 +129,7 @@ class TinyVpnService : VpnService() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
             ACTION_STOP -> stopTunnel()
-            else -> startTunnel()
+            else -> startTunnel(intent?.getBooleanExtra(EXTRA_FOREGROUND, false) == true)
         }
         return START_STICKY
     }
@@ -131,14 +139,14 @@ class TinyVpnService : VpnService() {
         super.onDestroy()
     }
 
-    private fun startTunnel() {
+    private fun startTunnel(forceForeground: Boolean = false) {
         configureNativeLogging()
         if (starting || tunnelActive) {
             AppLog.w(TAG, "VPN start ignored starting=$starting active=$tunnelActive")
             return
         }
         starting = true
-        if (ConfigStore.loadGlobalSettings(this).trafficNotification) {
+        if (forceForeground || ConfigStore.loadGlobalSettings(this).trafficNotification) {
             startForeground(1, notification(t(S.STATUS_STARTING), "↓ 0 B (0 B/s)   ↑ 0 B (0 B/s)"))
         }
         val pendingTeardown = teardownDone
@@ -259,7 +267,7 @@ class TinyVpnService : VpnService() {
             ResolverSelector.lastConnectedTransport = choice.transport
             if (!tunnelActive || lifecycleGeneration != generation) error("VPN start cancelled")
             MiniSlipstreamSocksBridge.start(
-                listenHost = "127.0.0.1",
+                listenHost = proxyListenHost(),
                 listenPort = bridgePort,
                 slipstreamHost = "127.0.0.1",
                 slipstreamPort = slipstreamPort,
@@ -272,24 +280,16 @@ class TinyVpnService : VpnService() {
             ).getOrThrow()
             if (!tunnelActive || lifecycleGeneration != generation) error("VPN start cancelled")
 
-            val builder = Builder()
-                .setSession("Smugly")
-                .setMtu(1500)
-                .addAddress("10.255.0.2", 32)
-                .addAddress("fd00::2", 128)
-                .addRoute("0.0.0.0", 0)
-                .addRoute("::", 0)
-                .addDnsServer(VPN_DNS_PRIMARY)
-                .addDnsServer(VPN_DNS_SECONDARY)
-            applyAppFilter(builder)
-            tunFd = builder.establish() ?: error("VpnService.Builder.establish returned null")
+            val tun = ConfigStore.loadGlobalSettings(this).tun
+            tunFd = establishTun(tun, TunPlan.dnsServers(tun.dnsServers))
 
             HevSocks5Tunnel.start(
                 tunFd = tunFd ?: error("TUN fd is null"),
                 socksAddress = "127.0.0.1",
                 socksPort = bridgePort,
                 username = localSocks.first,
-                password = localSocks.second
+                password = localSocks.second,
+                mtu = TunPlan.mtu(tun)
             ).getOrThrow()
             if (!tunnelActive || lifecycleGeneration != generation) error("VPN start cancelled")
             maybeUpdateTrafficNotification(0, 0, force = true)
@@ -346,7 +346,7 @@ class TinyVpnService : VpnService() {
             // has none, and effectiveS3fuToml() derives one from its fields.
             S3fuBridge.startClient(
                 configToml = config.effectiveS3fuToml(),
-                socksListen = "127.0.0.1:$socksPort",
+                socksListen = "${proxyListenHost()}:$socksPort",
                 caFile = caPath
             ).getOrThrow()
             if (!tunnelActive || lifecycleGeneration != generation) error("VPN start cancelled")
@@ -358,18 +358,10 @@ class TinyVpnService : VpnService() {
             }
             if (!tunnelActive || lifecycleGeneration != generation) error("VPN start cancelled")
 
-            val builder = Builder()
-                .setSession("Smugly")
-                .setMtu(1500)
-                .addAddress("10.255.0.2", 32)
-                .addAddress("fd00::2", 128)
-                .addRoute("0.0.0.0", 0)
-                .addRoute("::", 0)
-                // Same as CDNFU: raw DNS UDP to 1.1.1.1 through S3 is lossy (Telegram
-                // has IPs cached, browsers do not) so the tab never resolves.
-                .addDnsServer(HevSocks5Tunnel.MAPDNS_ADDRESS)
-            applyAppFilter(builder)
-            tunFd = builder.establish() ?: error("VpnService.Builder.establish returned null")
+            // Same as CDNFU: raw DNS UDP to 1.1.1.1 through S3 is lossy (Telegram
+            // has IPs cached, browsers do not) so the tab never resolves.
+            val tun = ConfigStore.loadGlobalSettings(this).tun
+            tunFd = establishTun(tun, listOf(HevSocks5Tunnel.MAPDNS_ADDRESS))
 
             // s3fu implements standard SOCKS5 UDP ASSOCIATE (no auth) -> hev udp='udp'.
             // mapdns restores hostnames on CONNECT; QUIC is rejected in hev.
@@ -381,7 +373,8 @@ class TinyVpnService : VpnService() {
                 password = null,
                 udpMode = "udp",
                 mapDns = true,
-                rejectNonDnsUdp = false
+                rejectNonDnsUdp = false,
+                mtu = TunPlan.mtu(tun)
             ).getOrThrow()
             if (!tunnelActive || lifecycleGeneration != generation) error("VPN start cancelled")
 
@@ -429,7 +422,7 @@ class TinyVpnService : VpnService() {
             val socksPort = config.listenPort
             CdnfuBridge.startClient(
                 configToml = config.effectiveCdnfuToml(),
-                socksListen = "127.0.0.1:$socksPort"
+                socksListen = "${proxyListenHost()}:$socksPort"
             ).getOrThrow()
             if (!tunnelActive || lifecycleGeneration != generation) error("VPN start cancelled")
 
@@ -441,18 +434,10 @@ class TinyVpnService : VpnService() {
             }
             if (!tunnelActive || lifecycleGeneration != generation) error("VPN start cancelled")
 
-            val builder = Builder()
-                .setSession("Smugly")
-                .setMtu(1500)
-                .addAddress("10.255.0.2", 32)
-                .addAddress("fd00::2", 128)
-                .addRoute("0.0.0.0", 0)
-                .addRoute("::", 0)
-                // mapdns answers here; apps must NOT use 1.1.1.1 (each DNS query was a full
-                // XHTTP UDP session and made the tunnel unusable).
-                .addDnsServer(HevSocks5Tunnel.MAPDNS_ADDRESS)
-            applyAppFilter(builder)
-            tunFd = builder.establish() ?: error("VpnService.Builder.establish returned null")
+            // mapdns answers here; apps must NOT use 1.1.1.1 (each DNS query was a full
+            // XHTTP UDP session and made the tunnel unusable).
+            val tun = ConfigStore.loadGlobalSettings(this).tun
+            tunFd = establishTun(tun, listOf(HevSocks5Tunnel.MAPDNS_ADDRESS))
 
             // mapdns: hostname restored on SOCKS CONNECT, so DNS never rides as UDP.
             //
@@ -469,7 +454,8 @@ class TinyVpnService : VpnService() {
                 password = null,
                 udpMode = "udp",
                 mapDns = true,
-                rejectNonDnsUdp = false
+                rejectNonDnsUdp = false,
+                mtu = TunPlan.mtu(tun)
             ).getOrThrow()
             if (!tunnelActive || lifecycleGeneration != generation) error("VPN start cancelled")
 
@@ -514,18 +500,22 @@ class TinyVpnService : VpnService() {
             // The HTTP proxy apps are handed sits one port up, the way every other client lays it
             // out (10808 SOCKS / 10809 HTTP). Only added when it is actually going to be
             // advertised — an inbound nobody dials is just an open port.
-            val appProxy = ConfigStore.loadGlobalSettings(this).appHttpProxy &&
+            val global = ConfigStore.loadGlobalSettings(this)
+            val appProxy = global.appHttpProxy &&
                 Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q
+            val listen = XrayConfigBuilder.listenAddress(global.allowLan)
             // A config that already publishes an HTTP inbound keeps its own port — that one is
             // the user's decision and may be written down elsewhere. Only a config without one
             // gets ours, one above the SOCKS port the way every other client lays it out.
             val httpPort = XrayConfigBuilder.httpPortOf(config.xrayConfigJson) ?: (socksPort + 1)
-            val configJson = XrayConfigBuilder.withSocksPort(config.xrayConfigJson, socksPort)
-                .let { if (appProxy) XrayConfigBuilder.withHttpPort(it, httpPort) else it }
+            val configJson = XrayConfigBuilder.withSocksPort(config.xrayConfigJson, socksPort, listen)
+                .let { if (appProxy) XrayConfigBuilder.withHttpPort(it, httpPort, listen) else it }
+                .let { XrayRouting.apply(it, global.routing) }
             AppLog.i(
                 TAG,
                 "XRAY start server=${XrayConfigBuilder.describeServer(configJson) ?: "?"} " +
-                    "socks=127.0.0.1:$socksPort core=${XrayBridge.version() ?: "?"}"
+                    "socks=$listen:$socksPort core=${XrayBridge.version() ?: "?"} " +
+                    "directRu=${global.routing.directRu} blockAds=${global.routing.blockAds}"
             )
 
             XrayBridge.startClient(configJson).getOrThrow()
@@ -541,27 +531,18 @@ class TinyVpnService : VpnService() {
             }
             if (!tunnelActive || lifecycleGeneration != generation) error("VPN start cancelled")
 
-            val builder = Builder()
-                .setSession("Smugly")
-                .setMtu(1500)
-                .addAddress("10.255.0.2", 32)
-                .addAddress("fd00::2", 128)
-                .addRoute("0.0.0.0", 0)
-                .addRoute("::", 0)
-                .addDnsServer(VPN_DNS_PRIMARY)
-                .addDnsServer(VPN_DNS_SECONDARY)
-            applyAppFilter(builder)
-            if (appProxy) {
-                // Proxy-aware apps now send `CONNECT host:port` instead of dialling an address
-                // they resolved themselves, so the host name survives all the way to the routing
-                // rules. That is what makes `.onion` / `.i2p` reachable: nothing resolves those,
-                // so through the TUN alone the browser never even opens a connection.
-                runCatching {
-                    builder.setHttpProxy(ProxyInfo.buildDirectProxy("127.0.0.1", httpPort))
-                    AppLog.i(TAG, "XRAY app http proxy 127.0.0.1:$httpPort")
-                }.onFailure { AppLog.w(TAG, "setHttpProxy failed: ${it.message}") }
+            tunFd = establishTun(global.tun, TunPlan.dnsServers(global.tun.dnsServers)) { builder ->
+                if (appProxy) {
+                    // Proxy-aware apps now send `CONNECT host:port` instead of dialling an address
+                    // they resolved themselves, so the host name survives all the way to the routing
+                    // rules. That is what makes `.onion` / `.i2p` reachable: nothing resolves those,
+                    // so through the TUN alone the browser never even opens a connection.
+                    runCatching {
+                        builder.setHttpProxy(ProxyInfo.buildDirectProxy("127.0.0.1", httpPort))
+                        AppLog.i(TAG, "XRAY app http proxy 127.0.0.1:$httpPort")
+                    }.onFailure { AppLog.w(TAG, "setHttpProxy failed: ${it.message}") }
+                }
             }
-            tunFd = builder.establish() ?: error("VpnService.Builder.establish returned null")
 
             // The generated socks inbound sets "udp": true, i.e. real SOCKS5 UDP
             // ASSOCIATE -> hev udp='udp' (same as s3fu, unlike the DNS tunnel).
@@ -571,7 +552,8 @@ class TinyVpnService : VpnService() {
                 socksPort = socksPort,
                 username = null,
                 password = null,
-                udpMode = "udp"
+                udpMode = "udp",
+                mtu = TunPlan.mtu(global.tun)
             ).getOrThrow()
             if (!tunnelActive || lifecycleGeneration != generation) error("VPN start cancelled")
 
@@ -595,15 +577,11 @@ class TinyVpnService : VpnService() {
         val hev = HevSocks5Tunnel.stats()
         maybeUpdateTrafficNotification(hev.rxBytes, hev.txBytes)
         val running = XrayBridge.isRunning()
-        if (shouldLogLightDiagnostics()) {
+        lightDiagnosticsLine("xray", running, hev)?.let { line ->
             // queryStats RESETS the counters, so these are per-interval deltas.
             val up = XrayBridge.queryStats(XrayConfigBuilder.PROXY_TAG, XrayBridge.UPLINK)
             val down = XrayBridge.queryStats(XrayConfigBuilder.PROXY_TAG, XrayBridge.DOWNLINK)
-            AppLog.i(
-                TAG,
-                "diag[xray] running=$running hevRunning=${HevSocks5Tunnel.isRunning()} " +
-                    "tunRx=${hev.rxBytes} tunTx=${hev.txBytes} proxyUp=$up proxyDown=$down"
-            )
+            AppLog.i(TAG, "$line proxyUp=${formatBytes(up)} proxyDown=${formatBytes(down)}")
         }
         if (!running && tunnelActive) {
             AppLog.w(TAG, "xray core stopped while tunnel active; lastError=${XrayBridge.lastError() ?: "none"}")
@@ -627,6 +605,41 @@ class TinyVpnService : VpnService() {
      * `NameNotFoundException` for a package that has since been uninstalled, and one stale entry
      * in a saved list must not take the whole tunnel down with it.
      */
+    private fun proxyListenHost(): String =
+        XrayConfigBuilder.listenAddress(ConfigStore.loadGlobalSettings(this).allowLan)
+
+    private fun establishTun(
+        tun: TunSettings,
+        dnsServers: List<String>,
+        extra: (Builder) -> Unit = {}
+    ): ParcelFileDescriptor {
+        val v4 = TunPlan.ipv4Routes(tun)
+        val v6 = TunPlan.ipv6Routes(tun)
+        val builder = Builder()
+            .setSession(t(S.APP_NAME))
+            .setMtu(TunPlan.mtu(tun))
+            .addAddress("10.255.0.2", 32)
+        if (v6.isNotEmpty()) builder.addAddress("fd00::2", 128)
+        v4.forEach { builder.addRoute(it.address, it.prefix) }
+        v6.forEach { builder.addRoute(it.address, it.prefix) }
+        var dnsAdded = 0
+        dnsServers.forEach { dns ->
+            if (!tun.ipv6 && !dns.contains('.')) return@forEach
+            runCatching { builder.addDnsServer(dns) }
+                .onSuccess { dnsAdded++ }
+                .onFailure { AppLog.w(TAG, "addDnsServer($dns) failed: ${it.message}") }
+        }
+        if (dnsAdded == 0) TunPlan.DEFAULT_DNS.forEach { builder.addDnsServer(it) }
+        applyAppFilter(builder)
+        extra(builder)
+        AppLog.i(
+            TAG,
+            "tun mtu=${TunPlan.mtu(tun)} ipv6=${tun.ipv6} bypassLan=${tun.bypassLan} " +
+                "v4Routes=${v4.size} v6Routes=${v6.size} dns=${dnsServers.joinToString(",")}"
+        )
+        return builder.establish() ?: error("VpnService.Builder.establish returned null")
+    }
+
     private fun applyAppFilter(builder: Builder) {
         val settings = ConfigStore.loadGlobalSettings(this)
         val plan = PerAppFilter.plan(settings.perAppMode, settings.perAppPackages, packageName)
@@ -698,13 +711,7 @@ class TinyVpnService : VpnService() {
         val hev = HevSocks5Tunnel.stats()
         maybeUpdateTrafficNotification(hev.rxBytes, hev.txBytes)
         val running = S3fuBridge.isRunning()
-        if (shouldLogLightDiagnostics()) {
-            AppLog.i(
-                TAG,
-                "diag[s3fu] running=$running hevRunning=${HevSocks5Tunnel.isRunning()} " +
-                    "tunRx=${hev.rxBytes} tunTx=${hev.txBytes}"
-            )
-        }
+        lightDiagnosticsLine("s3fu", running, hev)?.let { AppLog.i(TAG, it) }
         if (!running && tunnelActive) {
             AppLog.w(TAG, "s3fu client stopped while tunnel active; lastError=${S3fuBridge.lastError() ?: "none"}")
         }
@@ -715,13 +722,7 @@ class TinyVpnService : VpnService() {
         val hev = HevSocks5Tunnel.stats()
         maybeUpdateTrafficNotification(hev.rxBytes, hev.txBytes)
         val running = CdnfuBridge.isRunning()
-        if (shouldLogLightDiagnostics()) {
-            AppLog.i(
-                TAG,
-                "diag[cdnfu] running=$running hevRunning=${HevSocks5Tunnel.isRunning()} " +
-                    "tunRx=${hev.rxBytes} tunTx=${hev.txBytes}"
-            )
-        }
+        lightDiagnosticsLine("cdnfu", running, hev)?.let { AppLog.i(TAG, it) }
         if (!running && tunnelActive) {
             AppLog.w(TAG, "cdnfu client stopped while tunnel active; lastError=${CdnfuBridge.lastError() ?: "none"}")
         }
@@ -741,7 +742,6 @@ class TinyVpnService : VpnService() {
         if (waitForSlipstreamReady(readyTimeout)) {
             if (config.resolverMode == Config.ResolverMode.AUTO && choice.selectedHost.isNotBlank()) {
                 ResolverSelector.rememberTransport(this, config, choice.selectedHost, choice.transport)
-                ResolverSelector.rememberNetworkTransportPreference(this, choice.transport)
             }
             return choice to port
         }
@@ -773,7 +773,6 @@ class TinyVpnService : VpnService() {
         ResolverSelector.rememberTransport(
             this, config, altChoice.selectedHost, altTransport, resetValidation = true
         )
-        ResolverSelector.rememberNetworkTransportPreference(this, altTransport)
         return altChoice to port
     }
 
@@ -890,6 +889,12 @@ class TinyVpnService : VpnService() {
         lastTx = 0
         lastTunRx = 0
         lastTunTx = 0
+        lightDiagLoggedAt = 0
+        lightDiagRx = 0
+        lightDiagTx = 0
+        lightSampleAt = 0
+        lightSampleRx = 0
+        lightSampleTx = 0
         lastBridgeRx = 0
         lastBridgeTx = 0
         lastBridgeFailures = 0
@@ -1564,7 +1569,7 @@ class TinyVpnService : VpnService() {
                     )
                 }
                 MiniSlipstreamSocksBridge.start(
-                    listenHost = "127.0.0.1",
+                    listenHost = proxyListenHost(),
                     listenPort = bridgePort,
                     slipstreamHost = "127.0.0.1",
                     slipstreamPort = slipstreamPort,
@@ -1647,7 +1652,7 @@ class TinyVpnService : VpnService() {
                 )
             }
             MiniSlipstreamSocksBridge.start(
-                listenHost = "127.0.0.1",
+                listenHost = proxyListenHost(),
                 listenPort = bridgePort,
                 slipstreamHost = "127.0.0.1",
                 slipstreamPort = slipstreamPort,
@@ -1821,13 +1826,40 @@ class TinyVpnService : VpnService() {
     private fun isScreenInteractive(): Boolean =
         runCatching { getSystemService(PowerManager::class.java)?.isInteractive }.getOrNull() ?: true
 
-    private fun shouldLogLightDiagnostics(): Boolean {
+    private fun lightDiagnosticsLine(
+        engine: String,
+        running: Boolean,
+        hev: HevSocks5Tunnel.TrafficStats
+    ): String? {
         val now = SystemClock.elapsedRealtime()
-        if (isScreenInteractive() || now - lightDiagLoggedAt >= LIGHT_DIAG_SCREEN_OFF_INTERVAL_MS) {
-            lightDiagLoggedAt = now
-            return true
+        val sampleElapsed = now - lightSampleAt
+        val rates = if (lightSampleAt == 0L || sampleElapsed <= 0) {
+            ""
+        } else {
+            val down = ((hev.rxBytes - lightSampleRx).coerceAtLeast(0) * 1000L) / sampleElapsed
+            val up = ((hev.txBytes - lightSampleTx).coerceAtLeast(0) * 1000L) / sampleElapsed
+            " down=${formatRate(down)} up=${formatRate(up)}"
         }
-        return false
+        lightSampleAt = now
+        lightSampleRx = hev.rxBytes
+        lightSampleTx = hev.txBytes
+        val first = lightDiagLoggedAt == 0L
+        val elapsed = now - lightDiagLoggedAt
+        val moved = hev.rxBytes != lightDiagRx || hev.txBytes != lightDiagTx
+        val interval = if (isScreenInteractive()) {
+            LIGHT_DIAG_ACTIVE_INTERVAL_MS
+        } else {
+            LIGHT_DIAG_SCREEN_OFF_INTERVAL_MS
+        }
+        val due = first ||
+            (moved && elapsed >= interval - LIGHT_DIAG_JITTER_MS) ||
+            elapsed >= LIGHT_DIAG_IDLE_INTERVAL_MS - LIGHT_DIAG_JITTER_MS
+        if (!due) return null
+        lightDiagLoggedAt = now
+        lightDiagRx = hev.rxBytes
+        lightDiagTx = hev.txBytes
+        return "diag[$engine] running=$running hev=${HevSocks5Tunnel.isRunning()}$rates " +
+            "total down=${formatBytes(hev.rxBytes)} up=${formatBytes(hev.txBytes)}"
     }
 
     private fun notification(title: String, text: String): Notification {
@@ -1874,13 +1906,14 @@ class TinyVpnService : VpnService() {
     private fun createChannel() {
         if (Build.VERSION.SDK_INT >= 26) {
             val mgr = getSystemService(NotificationManager::class.java)
-            mgr.createNotificationChannel(NotificationChannel(CHANNEL, "Smugly", NotificationManager.IMPORTANCE_LOW))
+            mgr.createNotificationChannel(NotificationChannel(CHANNEL, t(S.APP_NAME), NotificationManager.IMPORTANCE_LOW))
         }
     }
 
     companion object {
         const val ACTION_START = "app.smugly.START"
         const val ACTION_STOP = "app.smugly.STOP"
+        const val EXTRA_FOREGROUND = "app.smugly.extra.FOREGROUND"
 
         // Snapshot of the rich per-tick diagnostics already computed for the logcat "diag" line,
         // additionally exposed here so the in-app Diagnostics screen can show it (not just logcat).
@@ -1905,10 +1938,11 @@ class TinyVpnService : VpnService() {
             private set
         private const val CHANNEL = "smugly"
         private const val TAG = "TinyVpnService"
-        private const val VPN_DNS_PRIMARY = "1.1.1.1"
-        private const val VPN_DNS_SECONDARY = "8.8.8.8"
         private const val DIAGNOSTICS_INTERVAL_MS = 5_000L
+        private const val LIGHT_DIAG_ACTIVE_INTERVAL_MS = 15_000L
         private const val LIGHT_DIAG_SCREEN_OFF_INTERVAL_MS = 60_000L
+        private const val LIGHT_DIAG_IDLE_INTERVAL_MS = 300_000L
+        private const val LIGHT_DIAG_JITTER_MS = 250L
         private const val READY_RECOVERY_MS = 3_000L
         private const val READY_RECOVERY_AFTER_UPLOAD_MS = 3_000L
         private const val TRAFFIC_RECOVERY_MS = 15_000L

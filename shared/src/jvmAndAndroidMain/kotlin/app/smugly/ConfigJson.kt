@@ -57,6 +57,7 @@ object ConfigJson {
             // in an older one (it falls back to the fields) instead of losing its server.
             .put("s3fuToml", config.s3fuToml)
             .put("cdnfuToml", config.cdnfuToml)
+            .put("xrayManual", config.xrayManual)
 
     fun configFromJson(json: JSONObject): Config =
         Config(
@@ -98,6 +99,7 @@ object ConfigJson {
             cdnfuMultipath = json.optInt("cdnfuMultipath", 4).coerceIn(0, 32),
             s3fuToml = json.optString("s3fuToml", ""),
             cdnfuToml = json.optString("cdnfuToml", ""),
+            xrayManual = json.optBoolean("xrayManual", false),
         )
 
     fun profileToJson(profile: ConfigProfile): JSONObject =

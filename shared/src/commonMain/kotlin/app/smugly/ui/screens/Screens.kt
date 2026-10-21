@@ -60,6 +60,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.input.pointer.PointerId
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.TextRange
@@ -74,7 +75,6 @@ import app.smugly.ui.theme.SmuglyStroke
 import app.smugly.ui.theme.SmuglyTextMuted
 import app.smugly.AppLanguage
 import app.smugly.Config
-import app.smugly.isDesktop
 import app.smugly.ConfigProfile
 import app.smugly.GlobalSettings
 import app.smugly.S
@@ -151,6 +151,7 @@ fun HomeScreen(
      * The host disables full-screen drawer-swipe so long-press text selection is not stolen.
      */
     onBlockDrawerGestures: (Boolean) -> Unit = {},
+    onDrawerSwipeVeto: (PointerId) -> Unit = {},
     /** Where the Home tab sits among the folders, once Home exists. */
     homeFolderIndex: Int = 0,
     /** Folder to open on entry: a subscription id, or blank for Home. */
@@ -179,7 +180,10 @@ fun HomeScreen(
     collapsedCategories: Set<String> = emptySet(),
     onCollapsedCategoriesChange: (Set<String>) -> Unit = {},
     /** New tab order: subscription ids in order, plus the slot Home ended up in. */
-    onReorderFolders: (subscriptionIds: List<String>, homeIndex: Int) -> Unit = { _, _ -> }
+    onReorderFolders: (subscriptionIds: List<String>, homeIndex: Int) -> Unit = { _, _ -> },
+    emptyState: (@Composable (openAddMenu: () -> Unit) -> Unit)? = null,
+    managedIsTrial: Boolean = false,
+    onOpenWebCabinet: (() -> Unit)? = null
 ) {
     var addMenu by remember { mutableStateOf(false) }
     var moreFor by remember { mutableStateOf<ConfigProfile?>(null) }
@@ -400,18 +404,19 @@ fun HomeScreen(
                 screenOrigin[1] = root.y.toInt()
             }
     ) {
+        fun openAddMenu() {
+            menuAnchorY = addAnchor[0] - screenOrigin[1]
+            menuAnchorX = null
+            moreFor = null
+            folderMenuOpen = false
+            addMenu = true
+        }
         // TopBar full-bleed (menu / + on window edges); list content keeps side padding.
         Column(Modifier.fillMaxSize()) {
             TopBar(
                 title = t(S.HOME),
                 onMenu = onMenu,
-                onAdd = {
-                    menuAnchorY = addAnchor[0] - screenOrigin[1]
-                    menuAnchorX = null
-                    moreFor = null
-                    folderMenuOpen = false
-                    addMenu = true
-                },
+                onAdd = { openAddMenu() },
                 onAddAnchor = { addAnchor[0] = it }
             )
             FolderTabs(
@@ -448,6 +453,7 @@ fun HomeScreen(
                 },
                 onMenuDismiss = { folderMenuOpen = false },
                 onDragActive = { tabDragging = it },
+                onBackScrollableDown = onDrawerSwipeVeto,
                 onMove = { from, to ->
                     // A move is expressed as the resulting slot order; whether Home moved or a
                     // subscription did falls out of where the null lands.
@@ -510,7 +516,9 @@ fun HomeScreen(
                 // Empty local folders (Home / a hand-made group) share this Box so the hint
                 // sits at the same height. Routing them through LazyColumn used to stack
                 // contentPadding and the item's own 112.dp clearance and parked the text higher.
-                if (pageDisplayed.isEmpty() && pageSubscription?.showsInfoCard != true) {
+                if (pageSubscription == null && profiles.isEmpty() && emptyState != null) {
+                    emptyState { openAddMenu() }
+                } else if (pageDisplayed.isEmpty() && pageSubscription?.showsInfoCard != true) {
                     // BottomConnectBar is drawn as an overlay (not in this Column), so centering
                     // in raw fillMaxSize sits too low. Same 112.dp clearance LazyColumn uses.
                     Box(
@@ -599,7 +607,7 @@ fun HomeScreen(
                             .coerceAtLeast(lowest)
                         val top = wantTop.coerceIn(lowest, highest)
                         dragOffsetY = top - me.offset
-                        val center = top + me.size / 2f
+                        val center = wantTop + me.size / 2f
                         // Nearest reorderable neighbour by centre distance; swap only once our
                         // centre has crossed theirs in that direction. Overlap-only targeting
                         // oscillated at the bottom: after a swap the centre still sat inside the
@@ -855,7 +863,14 @@ fun HomeScreen(
                                     subscription = sub,
                                     nowMs = nowMs,
                                     onRefresh = { onRefreshSubscription(sub.id) },
-                                    refreshing = refreshingSubscriptionId == sub.id
+                                    refreshing = refreshingSubscriptionId == sub.id,
+                                    titleOverride = if (sub.managed && managedIsTrial) t(S.SUBSCRIPTION_TRIAL) else null,
+                                    actionLabel = if (sub.managed && onOpenWebCabinet != null) {
+                                        t(if (managedIsTrial) S.BUY_FULL_SUBSCRIPTION_BTN else S.EXTEND_SUBSCRIPTION_BTN)
+                                    } else {
+                                        null
+                                    },
+                                    onAction = onOpenWebCabinet
                                 )
                             }
                         }
@@ -873,7 +888,11 @@ fun HomeScreen(
                                     contentAlignment = Alignment.Center
                                 ) {
                                     Text(
-                                        text = t(S.NO_PROFILES_IN_FOLDER_HINT),
+                                        text = if (pageSubscription?.managed == true) {
+                                            t(S.ACCOUNT_PREPARING)
+                                        } else {
+                                            t(S.NO_PROFILES_IN_FOLDER_HINT)
+                                        },
                                         color = SmuglyTextSecondary,
                                         fontSize = 15.sp,
                                         lineHeight = 20.sp,
@@ -938,14 +957,16 @@ fun HomeScreen(
             }
         }
 
-        BottomConnectBar(
-            status = connect.statusText.ifBlank { t(S.STATUS_NOT_CONNECTED) },
-            traffic = connect.trafficText,
-            running = connect.running,
-            loading = connect.connecting,
-            onToggle = onToggle,
-            modifier = Modifier.align(Alignment.BottomCenter)
-        )
+        if (profiles.isNotEmpty() || connect.running || connect.connecting) {
+            BottomConnectBar(
+                status = connect.statusText.ifBlank { t(S.STATUS_NOT_CONNECTED) },
+                traffic = connect.trafficText,
+                running = connect.running,
+                loading = connect.connecting,
+                onToggle = onToggle,
+                modifier = Modifier.align(Alignment.BottomCenter)
+            )
+        }
 
         // [folderDraft] holds the content and is never cleared on dismiss — clearing it dropped the
         // card out of composition on the same frame, so its exit animation never got to run and
@@ -1000,14 +1021,15 @@ fun HomeScreen(
         // [menuProfile] keeps the rows populated while the panel fades out; only
         // [moreFor] is cleared on dismiss.
         menuProfile?.let { p ->
+            val accountBound = subscriptions.any { it.id == p.subscriptionId && it.managed }
             MenuLayer(
                 visible = moreFor?.id == p.id,
                 anchorY = menuAnchorY,
                 onDismiss = { moreFor = null }
             ) {
-                MenuRow(t(S.CD_EDIT_PROFILE)) { moreFor = null; onEdit(p) }
+                if (!accountBound) MenuRow(t(S.CD_EDIT_PROFILE)) { moreFor = null; onEdit(p) }
                 MenuRow(t(S.MENU_MEASURE_LATENCY)) { moreFor = null; onMeasureLatency(p) }
-                MenuRow(t(S.MENU_EXPORT_PROFILE)) { moreFor = null; onExport(p) }
+                if (!accountBound) MenuRow(t(S.MENU_EXPORT_PROFILE)) { moreFor = null; onExport(p) }
             }
         }
         // Folder management: the same dropdown as + / ⋮, dropped under the tab that was
@@ -1024,7 +1046,8 @@ fun HomeScreen(
                 anchorX = menuAnchorX,
                 onDismiss = { folderMenuOpen = false }
             ) {
-                if (menuSub != null) {
+                val accountBound = menuSub?.managed == true
+                if (menuSub != null && !accountBound) {
                     MenuRow(t(S.EDIT_FOLDER)) {
                         folderMenuOpen = false
                         folderDraft = FolderDraft.of(menuSub)
@@ -1035,11 +1058,17 @@ fun HomeScreen(
                     folderMenuOpen = false
                     menuProfiles.forEach { onMeasureLatency(it) }
                 }
-                MenuRow(t(S.MENU_EXPORT_FOLDER)) {
+                if (!accountBound) MenuRow(t(S.MENU_EXPORT_FOLDER)) {
                     folderMenuOpen = false
                     onExportFolder(menuProfiles, menuFolderName)
                 }
-                if (menuSub != null) {
+                if (accountBound && onOpenWebCabinet != null) {
+                    MenuRow(t(S.WEB_CABINET)) {
+                        folderMenuOpen = false
+                        onOpenWebCabinet()
+                    }
+                }
+                if (menuSub != null && !accountBound) {
                     MenuRow(t(S.SUBSCRIPTION_DELETE)) {
                         folderMenuOpen = false
                         deletingFolder = menuSub
@@ -1196,156 +1225,6 @@ private fun folderRows(
 }
 
 @Composable
-fun SettingsScreen(
-    settings: GlobalSettings,
-    supportsVpn: Boolean,
-    /** Android status-bar traffic notification; hidden on desktop/iOS. */
-    showTrafficNotification: Boolean = false,
-    /** Local proxy username/password; hidden where the platform cannot use it (desktop). */
-    showLocalSocksAuth: Boolean = true,
-    /** In-app updates from GitHub releases; hidden where the app installs some other way. */
-    showUpdates: Boolean = false,
-    /** What the package manager says is installed — not the constant compiled into the UI. */
-    installedVersion: String = "",
-    checkingUpdate: Boolean = false,
-    onCheckUpdate: () -> Unit = {},
-    onMenu: () -> Unit,
-    onChange: (GlobalSettings) -> Unit
-) {
-    val languageOptions = listOf(
-        t(S.LANGUAGE_SYSTEM) to AppLanguage.SYSTEM,
-        "English" to AppLanguage.EN,
-        "Русский" to AppLanguage.RU
-    )
-    // Same setting, different machinery: a VpnService on the phone, a TUN adapter on the
-    // desktop. Calling it "VPN" on Windows would suggest something the app does not do.
-    val modeOptions = listOf(
-        t(S.CONNECTION_MODE_PROXY),
-        t(if (app.smugly.currentHostPlatform().isDesktop()) S.CONNECTION_MODE_TUN else S.CONNECTION_MODE_VPN)
-    )
-    val modeIndex = if (settings.mode == Config.Mode.VPN) 1 else 0
-    val langIndex = languageOptions.indexOfFirst { it.second == settings.language }.coerceAtLeast(0)
-
-    Column(Modifier.fillMaxSize().background(SmuglyBg)) {
-        TopBar(title = t(S.SETTINGS), onMenu = onMenu)
-        Column(
-            Modifier
-                .weight(1f)
-                .padding(horizontal = 10.dp)
-                .verticalScroll(rememberScrollState())
-                .padding(bottom = 24.dp)
-        ) {
-            // Local SOCKS listen port — desktop & mobile proxy path.
-            LabeledField(t(S.LOCAL_PORT)) {
-                SmuglyTextField(
-                    value = settings.listenPort.toString(),
-                    onValueChange = {
-                        onChange(settings.copy(listenPort = it.filter(Char::isDigit).toIntOrNull() ?: settings.listenPort))
-                    },
-                    number = true
-                )
-            }
-            // VPN vs proxy only where system VPN exists (Android/iOS). Desktop is always proxy.
-            if (supportsVpn) {
-                LabeledField(t(S.CONNECTION_MODE)) {
-                    PillSelector(
-                        options = modeOptions,
-                        selectedIndex = modeIndex,
-                        onSelected = { idx ->
-                            onChange(
-                                settings.copy(
-                                    mode = if (idx == 1) Config.Mode.VPN else Config.Mode.PROXY
-                                )
-                            )
-                        }
-                    )
-                }
-            }
-            LabeledField(t(S.LANGUAGE)) {
-                PillSelector(
-                    options = languageOptions.map { it.first },
-                    selectedIndex = langIndex,
-                    onSelected = { idx ->
-                        onChange(settings.copy(language = languageOptions[idx].second))
-                    }
-                )
-            }
-            Spacer(Modifier.height(6.dp))
-            SmuglyCheckbox(settings.fileLogging, t(S.ENABLE_DEBUG_MODE)) {
-                onChange(settings.copy(fileLogging = it))
-            }
-            // Phone status-bar traffic notification — not for desktop.
-            if (showTrafficNotification) {
-                SmuglyCheckbox(settings.trafficNotification, t(S.SHOW_TRAFFIC_NOTIFICATION)) {
-                    onChange(settings.copy(trafficNotification = it))
-                }
-            }
-            // Only the system-VPN platform can hand a proxy to other apps.
-            if (supportsVpn) {
-                SmuglyCheckbox(settings.appHttpProxy, t(S.APP_HTTP_PROXY)) {
-                    onChange(settings.copy(appHttpProxy = it))
-                }
-            }
-            // Local SOCKS auth only where the platform can actually use it — see
-            // HostPlatform.supportsLocalProxyAuth().
-            if (showLocalSocksAuth) {
-                SmuglyCheckbox(settings.localSocksAuthEnabled, t(S.PROTECT_LOCAL_SOCKS)) {
-                    onChange(settings.copy(localSocksAuthEnabled = it))
-                }
-                if (settings.localSocksAuthEnabled) {
-                    Spacer(Modifier.height(4.dp))
-                    LabeledField(t(S.SOCKS_USERNAME)) {
-                        SmuglyTextField(settings.localSocksUsername, { onChange(settings.copy(localSocksUsername = it)) })
-                    }
-                    LabeledField(t(S.SOCKS_PASSWORD)) {
-                        SmuglyTextField(
-                            settings.localSocksPassword,
-                            { onChange(settings.copy(localSocksPassword = it)) },
-                            password = true
-                        )
-                    }
-                }
-            }
-            LabeledField(t(S.DNS_RESOLVER_POOL)) {
-                SmuglyTextField(
-                    value = settings.dnsResolverPool,
-                    onValueChange = { onChange(settings.copy(dnsResolverPool = it)) },
-                    singleLine = false,
-                    minLines = 5
-                )
-            }
-            // Updates last: this is the only section that is about the app itself rather
-            // than about the tunnel.
-            if (showUpdates) {
-                SectionTitle(t(S.UPDATES_SECTION))
-                SmuglyCheckbox(settings.autoUpdate, t(S.UPDATE_AUTO)) {
-                    onChange(settings.copy(autoUpdate = it))
-                }
-                Spacer(Modifier.height(4.dp))
-                Row(
-                    Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.SpaceBetween
-                ) {
-                    Text(
-                        "${t(S.UPDATE_CURRENT_VERSION)}: $installedVersion",
-                        color = SmuglyTextSecondary,
-                        fontSize = 13.sp
-                    )
-                    AccentLinkButton(
-                        // The button is the only feedback a check that finds nothing gives
-                        // until the toast lands, so it says so while it is running.
-                        if (checkingUpdate) t(S.TOAST_UPDATE_CHECKING) else t(S.UPDATE_CHECK_BTN)
-                    ) {
-                        if (!checkingUpdate) onCheckUpdate()
-                    }
-                }
-            }
-        }
-    }
-}
-
-@Composable
 fun DiagnosticsScreen(
     logText: String,
     onMenu: () -> Unit,
@@ -1411,466 +1290,6 @@ fun DiagnosticsScreen(
                         modifier = Modifier.fillMaxWidth()
                     )
                 }
-            }
-        }
-    }
-}
-
-private val DnsQueryTypeOptions = listOf(
-    "TXT (16)" to 16,
-    "NULL (10)" to 10,
-    "HTTPS (65)" to 65
-)
-
-@Composable
-fun ProfileEditorScreen(
-    draft: EditorDraft,
-    onBack: () -> Unit,
-    onChange: (EditorDraft) -> Unit,
-    onSave: () -> Unit,
-    onDelete: (() -> Unit)?,
-    onLocalDns: () -> Unit,
-    /** Pretty-printer for a pasted Xray config; returns null when the text is not JSON. */
-    formatXray: (String) -> String? = { null }
-) {
-    val c = draft.config
-    val protocolOptions = listOf(
-        t(S.PROTOCOL_SLIPSTREAM),
-        t(S.PROTOCOL_S3FU),
-        t(S.PROTOCOL_CDNFU),
-        t(S.PROTOCOL_XRAY)
-    )
-    val protocolIndex = when (c.protocol) {
-        Config.TunnelProtocol.SLIPSTREAM -> 0
-        Config.TunnelProtocol.S3FU -> 1
-        Config.TunnelProtocol.CDNFU -> 2
-        Config.TunnelProtocol.XRAY -> 3
-    }
-    // Protocol list uses the same overlay as the + menu — never expands layout / pushes fields.
-    var protocolMenuOpen by remember { mutableStateOf(false) }
-    var protocolAnchorX by remember { mutableStateOf(0) }
-    var protocolAnchorY by remember { mutableStateOf(0) }
-    var protocolFieldWidth by remember { mutableStateOf(0) }
-    /** See the same field in HomeScreen: root anchors, menu placed inside this screen. */
-    val screenOrigin = remember { intArrayOf(0, 0) }
-
-    PlatformBackHandler(enabled = protocolMenuOpen) { protocolMenuOpen = false }
-
-    // Xray, s3fu and cdnfu are all "the profile IS a config file" protocols: the form is
-    // a full-height editor instead of a list of fields, because those engines have far
-    // more settings than a form can carry (and the app used to expose a fraction of them).
-    val isCodeProfile = c.protocol == Config.TunnelProtocol.XRAY ||
-        c.protocol == Config.TunnelProtocol.S3FU ||
-        c.protocol == Config.TunnelProtocol.CDNFU
-
-    Box(
-        Modifier
-            .fillMaxSize()
-            .background(SmuglyBg)
-            .onGloballyPositioned {
-                val root = it.positionInRoot()
-                screenOrigin[0] = root.x.toInt()
-                screenOrigin[1] = root.y.toInt()
-            }
-    ) {
-        Column(Modifier.fillMaxSize()) {
-            TopBar(
-                title = if (draft.profileId == null) t(S.NEW_PROFILE_TITLE) else t(S.EDIT_PROFILE_TITLE),
-                onBack = onBack,
-                // Save and delete live in the bar, where the + sits on the list screen — the form
-                // is a scrolling page and a button pinned under it was a second thing to reach.
-                onConfirm = onSave,
-                onDeleteAction = onDelete
-            )
-            // Config-file protocols: name/protocol stay fixed; the text fills remaining height
-            // and scrolls only inside the field. Nested verticalScroll+focus bring-into-view used
-            // to yank the page to top when the user scrolled the form then tapped the box.
-            // Slipstream: short form in a single page scroll.
-            if (isCodeProfile) {
-                Column(
-                    Modifier
-                        .padding(horizontal = 10.dp)
-                        .padding(bottom = 8.dp)
-                ) {
-                    LabeledField(t(S.PROFILE_NAME)) {
-                        ProfileNameField(
-                            name = draft.name,
-                            onNameChange = { onChange(draft.copy(name = it)) }
-                        )
-                    }
-                    LabeledField(t(S.PROTOCOL)) {
-                        DropdownField(
-                            label = protocolOptions[protocolIndex],
-                            open = protocolMenuOpen,
-                            onClick = { protocolMenuOpen = !protocolMenuOpen },
-                            onAnchor = { x, y, w ->
-                                protocolAnchorX = x - screenOrigin[0]
-                                protocolAnchorY = y - screenOrigin[1]
-                                protocolFieldWidth = w
-                            }
-                        )
-                    }
-                }
-                val editorModifier = Modifier
-                    .weight(1f)
-                    .fillMaxWidth()
-                    .padding(horizontal = 10.dp)
-                    .padding(bottom = 8.dp)
-                when (c.protocol) {
-                    Config.TunnelProtocol.S3FU -> CodeEditor(
-                        // Blank stored text means "not edited yet": show the config derived
-                        // from the profile's own values, so the box opens on a real config
-                        // to change rather than an empty page.
-                        text = c.effectiveS3fuToml(),
-                        onTextChange = { onChange(draft.copy(config = c.copy(s3fuToml = it))) },
-                        placeholder = "endpoint = \"https://…\"",
-                        highlight = TomlSyntaxHighlightTransformation,
-                        format = { null },
-                        modifier = editorModifier
-                    )
-                    Config.TunnelProtocol.CDNFU -> CodeEditor(
-                        text = c.effectiveCdnfuToml(),
-                        onTextChange = { onChange(draft.copy(config = c.copy(cdnfuToml = it))) },
-                        placeholder = "url = \"https://…\"",
-                        highlight = TomlSyntaxHighlightTransformation,
-                        format = { null },
-                        modifier = editorModifier
-                    )
-                    else -> CodeEditor(
-                        text = c.xrayConfigJson,
-                        onTextChange = { onChange(draft.copy(config = c.copy(xrayConfigJson = it))) },
-                        placeholder = "{}",
-                        highlight = JsonSyntaxHighlightTransformation,
-                        format = formatXray,
-                        modifier = editorModifier
-                    )
-                }
-            } else {
-                Column(
-                    Modifier
-                        .weight(1f)
-                        .padding(horizontal = 10.dp)
-                        .verticalScroll(rememberScrollState())
-                        .padding(bottom = 12.dp)
-                ) {
-                    LabeledField(t(S.PROFILE_NAME)) {
-                        ProfileNameField(
-                            name = draft.name,
-                            onNameChange = { onChange(draft.copy(name = it)) }
-                        )
-                    }
-                    LabeledField(t(S.PROTOCOL)) {
-                        DropdownField(
-                            label = protocolOptions[protocolIndex],
-                            open = protocolMenuOpen,
-                            onClick = { protocolMenuOpen = !protocolMenuOpen },
-                            onAnchor = { x, y, w ->
-                                protocolAnchorX = x - screenOrigin[0]
-                                protocolAnchorY = y - screenOrigin[1]
-                                protocolFieldWidth = w
-                            }
-                        )
-                    }
-                    // Only Slipstream reaches here; the config-file protocols took the
-                    // full-height editor branch above.
-                    SlipstreamEditor(
-                        c = c,
-                        onChange = { onChange(draft.copy(config = it)) },
-                        onLocalDns = onLocalDns
-                    )
-                }
-            }
-        }
-
-        MenuLayer(
-            visible = protocolMenuOpen,
-            anchorY = protocolAnchorY,
-            anchorX = protocolAnchorX,
-            panelWidthPx = protocolFieldWidth,
-            onDismiss = { protocolMenuOpen = false }
-        ) {
-            protocolOptions.forEachIndexed { idx, label ->
-                MenuRow(label) {
-                    protocolMenuOpen = false
-                    val p = when (idx) {
-                        1 -> Config.TunnelProtocol.S3FU
-                        2 -> Config.TunnelProtocol.CDNFU
-                        3 -> Config.TunnelProtocol.XRAY
-                        else -> Config.TunnelProtocol.SLIPSTREAM
-                    }
-                    onChange(draft.copy(config = c.copy(protocol = p)))
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun SlipstreamEditor(
-    c: Config,
-    onChange: (Config) -> Unit,
-    onLocalDns: () -> Unit
-) {
-    LabeledField(t(S.DOMAIN)) {
-        SmuglyTextField(c.domain, { onChange(c.copy(domain = it)) }, hint = "domain")
-    }
-    SectionTitle(t(S.DNS_RESOLVER))
-    LabeledField(t(S.DNS_MODE)) {
-        PillSelector(
-            listOf(t(S.DNS_MODE_MANUAL), t(S.DNS_MODE_AUTO)),
-            if (c.resolverMode == Config.ResolverMode.AUTO) 1 else 0
-        ) { idx ->
-            onChange(
-                c.copy(
-                    resolverMode = if (idx == 1) Config.ResolverMode.AUTO else Config.ResolverMode.MANUAL
-                )
-            )
-        }
-    }
-    // Manual DNS: host field + inline LOCAL (same row as Android Views).
-    if (c.resolverMode == Config.ResolverMode.MANUAL) {
-        LabeledField(t(S.RESOLVER_HOST)) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(4.dp)
-            ) {
-                SmuglyTextField(
-                    value = c.resolverHost,
-                    onValueChange = { onChange(c.copy(resolverHost = it)) },
-                    hint = "1.2.3.4 or 1.2.3.4, 5.6.7.8",
-                    singleLine = true,
-                    modifier = Modifier.weight(1f)
-                )
-                AccentLinkButton(t(S.LOCAL_BTN), onLocalDns)
-            }
-        }
-    }
-    LabeledField(t(S.RESOLVER_PORT)) {
-        SmuglyTextField(
-            c.resolverPort.toString(),
-            { onChange(c.copy(resolverPort = it.filter(Char::isDigit).toIntOrNull() ?: c.resolverPort)) },
-            number = true
-        )
-    }
-    // Transport belongs to the operator, not to the profile: T2 only carries data over TCP,
-    // Beeline only over UDP. In auto DNS the app measures both at connect and keeps the one
-    // that actually moves data, so a picker here would only be a way to be wrong — the value
-    // is never read in that mode (see ResolverSelector.validateTransport).
-    if (c.resolverMode == Config.ResolverMode.MANUAL) {
-        LabeledField(t(S.TRANSPORT)) {
-            PillSelector(
-                listOf("UDP", "TCP"),
-                if (c.resolverTransport == Config.ResolverTransport.TCP) 1 else 0
-            ) { idx ->
-                onChange(
-                    c.copy(
-                        resolverTransport = if (idx == 1) Config.ResolverTransport.TCP else Config.ResolverTransport.UDP
-                    )
-                )
-            }
-        }
-    } else {
-        HintText(t(S.HINT_TRANSPORT_AUTO))
-    }
-    val qTypeIdx = DnsQueryTypeOptions.indexOfFirst { it.second == c.dnsQueryType }.coerceAtLeast(0)
-    LabeledField(t(S.DNS_QUERY_TYPE)) {
-        PillSelector(DnsQueryTypeOptions.map { it.first }, qTypeIdx) { idx ->
-            onChange(c.copy(dnsQueryType = DnsQueryTypeOptions[idx].second))
-        }
-    }
-    HintText(t(S.HINT_DNS_QUERY_TYPE))
-    LabeledField(t(S.DNS_PATH_MODE)) {
-        PillSelector(
-            listOf(t(S.PATH_MODE_RECURSIVE), t(S.PATH_MODE_AUTHORITATIVE)),
-            if (c.resolverPathMode == Config.ResolverPathMode.AUTHORITATIVE) 1 else 0
-        ) { idx ->
-            onChange(
-                c.copy(
-                    resolverPathMode = if (idx == 1) {
-                        Config.ResolverPathMode.AUTHORITATIVE
-                    } else {
-                        Config.ResolverPathMode.RECURSIVE
-                    }
-                )
-            )
-        }
-    }
-    SectionTitle(t(S.AUTHENTICATION))
-    LabeledField(t(S.AUTH_MODE)) {
-        PillSelector(
-            listOf(t(S.AUTH_NO_AUTH), t(S.AUTH_LOGIN_PASSWORD)),
-            if (c.authMode == Config.AuthMode.LOGIN_PASSWORD) 1 else 0
-        ) { idx ->
-            onChange(
-                c.copy(
-                    authMode = if (idx == 1) Config.AuthMode.LOGIN_PASSWORD else Config.AuthMode.NO_AUTH
-                )
-            )
-        }
-    }
-    if (c.authMode == Config.AuthMode.LOGIN_PASSWORD) {
-        LabeledField(t(S.USERNAME)) {
-            SmuglyTextField(c.username, { onChange(c.copy(username = it)) })
-        }
-        LabeledField(t(S.PASSWORD)) {
-            SmuglyTextField(c.password, { onChange(c.copy(password = it)) }, password = true)
-        }
-    }
-    SectionTitle(t(S.ADVANCED_CLIENT_ONLY))
-    HintText(t(S.HINT_ADVANCED_CLIENT_ONLY))
-    LabeledField(t(S.DNS_LABEL_LENGTH)) {
-        SmuglyTextField(
-            c.dnsLabelLength.toString(),
-            { onChange(c.copy(dnsLabelLength = it.filter(Char::isDigit).toIntOrNull() ?: c.dnsLabelLength)) },
-            number = true
-        )
-    }
-    HintText(t(S.HINT_DNS_LABEL_LENGTH))
-    LabeledField(t(S.DNS_LABEL_LENGTH_JITTER)) {
-        SmuglyTextField(
-            c.dnsLabelLengthJitter.toString(),
-            {
-                onChange(
-                    c.copy(dnsLabelLengthJitter = it.filter(Char::isDigit).toIntOrNull() ?: c.dnsLabelLengthJitter)
-                )
-            },
-            number = true
-        )
-    }
-    HintText(t(S.HINT_DNS_LABEL_LENGTH_JITTER))
-    LabeledField(t(S.MAX_POLL_RATE)) {
-        SmuglyTextField(
-            c.maxPollQps.toString(),
-            { onChange(c.copy(maxPollQps = it.filter(Char::isDigit).toIntOrNull() ?: c.maxPollQps)) },
-            number = true
-        )
-    }
-    HintText(t(S.HINT_MAX_POLL_QPS))
-    LabeledField(t(S.MAX_DATA_RATE)) {
-        SmuglyTextField(
-            c.maxDataQps.toString(),
-            { onChange(c.copy(maxDataQps = it.filter(Char::isDigit).toIntOrNull() ?: c.maxDataQps)) },
-            number = true
-        )
-    }
-    HintText(t(S.HINT_MAX_DATA_QPS))
-    LabeledField(t(S.MAX_ACTIVE_CONNECTIONS)) {
-        SmuglyTextField(
-            c.maxActiveClients.toString(),
-            {
-                onChange(
-                    c.copy(maxActiveClients = it.filter(Char::isDigit).toIntOrNull() ?: c.maxActiveClients)
-                )
-            },
-            number = true
-        )
-    }
-    HintText(t(S.HINT_MAX_ACTIVE_CLIENTS))
-    SmuglyCheckbox(c.base64uEncoding, t(S.USE_BASE64U_ENCODING)) {
-        onChange(c.copy(base64uEncoding = it))
-    }
-    HintText(t(S.HINT_BASE64U))
-}
-
-// S3fuEditor / CdnfuEditor used to live here: one form field per setting, which is
-// exactly the limitation this replaced. Both protocols now use CodeEditor over the
-// whole config file (see TunnelToml for how old profiles are carried across).
-
-/**
- * Focus inside the editor must not scroll the page. Nested verticalScroll + the default
- * bring-into-view used to yank the form to the top the moment the text field was tapped.
- */
-private val NoOpBringIntoViewSpec = object : BringIntoViewSpec {
-    override fun calculateScrollDistance(
-        offset: Float,
-        size: Float,
-        containerSize: Float
-    ): Float = 0f
-}
-
-private val NoOpBringIntoViewResponder = object : BringIntoViewResponder {
-    override fun calculateRectForParent(localRect: Rect): Rect = Rect.Zero
-    override suspend fun bringChildIntoView(localRect: () -> Rect?) {
-        // Swallow the request entirely — do not scroll on focus.
-    }
-}
-
-@OptIn(ExperimentalFoundationApi::class)
-@Composable
-private fun CodeEditor(
-    text: String,
-    onTextChange: (String) -> Unit,
-    placeholder: String,
-    highlight: VisualTransformation,
-    format: (String) -> String?,
-    modifier: Modifier = Modifier
-) {
-    var field by remember {
-        mutableStateOf(TextFieldValue(text, TextRange(0)))
-    }
-    LaunchedEffect(text) {
-        if (text != field.text) {
-            val sel = field.selection
-            val max = text.length
-            field = TextFieldValue(
-                text,
-                TextRange(sel.start.coerceIn(0, max), sel.end.coerceIn(0, max))
-            )
-        }
-    }
-    val scroll = rememberScrollState()
-    val shape = RoundedCornerShape(10.dp)
-
-    // Disable focus-driven auto-scroll for everything inside this editor.
-    CompositionLocalProvider(LocalBringIntoViewSpec provides NoOpBringIntoViewSpec) {
-        Box(
-            modifier = modifier
-                .fillMaxWidth()
-                .clip(shape)
-                .background(SmuglyInput)
-                .border(1.dp, SmuglyStroke, shape)
-                .bringIntoViewResponder(NoOpBringIntoViewResponder)
-        ) {
-            // Outer scroll of full text height (not BTF internal scroller). Auto bring-into-view
-            // is disabled above so wheel position is preserved on first focus/click.
-            Box(
-                Modifier
-                    .fillMaxSize()
-                    .verticalScroll(scroll)
-                    .padding(horizontal = 12.dp, vertical = 12.dp)
-            ) {
-                BasicTextField(
-                    value = field,
-                    onValueChange = { next ->
-                        val pasted = next.text.length - field.text.length > 1
-                        val formatted = if (pasted) format(next.text) ?: next.text else next.text
-                        field = if (formatted != next.text) {
-                            TextFieldValue(formatted, TextRange(formatted.length))
-                        } else {
-                            next
-                        }
-                        onTextChange(field.text)
-                    },
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .bringIntoViewResponder(NoOpBringIntoViewResponder),
-                    textStyle = TextStyle(
-                        color = SmuglyTextPrimary,
-                        fontSize = 12.sp,
-                        fontFamily = FontFamily.Monospace
-                    ),
-                    cursorBrush = SolidColor(SmuglyAccent),
-                    visualTransformation = highlight,
-                    decorationBox = { inner ->
-                        Box(Modifier.fillMaxWidth()) {
-                            if (field.text.isEmpty()) {
-                                Text(placeholder, color = SmuglyTextMuted, fontSize = 12.sp)
-                            }
-                            inner()
-                        }
-                    }
-                )
             }
         }
     }

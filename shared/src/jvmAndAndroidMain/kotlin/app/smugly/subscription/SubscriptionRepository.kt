@@ -83,6 +83,41 @@ class SubscriptionRepository(private val storage: Storage) {
         return refresh(subscription.id)
     }
 
+    fun managed(): List<Subscription> = storage.loadSubscriptions().filter { it.managed }
+
+    fun adoptManaged(rawUrl: String, candidateId: String? = null, forceRefresh: Boolean = false): ImportResult {
+        val url = SubscriptionManager.normalizeSubscriptionUrl(rawUrl)
+            ?: return ImportResult(Subscription(id = "", name = "", url = rawUrl), 0, "not a subscription URL")
+        val all = storage.loadSubscriptions()
+        val existing = all.firstOrNull { it.managed }
+            ?: candidateId?.let { id -> all.firstOrNull { it.id == id } }
+            ?: all.firstOrNull { it.url == url }
+        if (existing == null) {
+            val subscription = Subscription(
+                id = storage.newId(),
+                name = "",
+                url = url,
+                addedAtMs = storage.nowMs(),
+                allowReorder = false,
+                managed = true
+            )
+            storage.saveSubscriptions(listOf(subscription) + all)
+            return refresh(subscription.id)
+        }
+        val adopted = existing.copy(
+            url = url,
+            managed = true,
+            enabled = true,
+            allowReorder = false,
+            showInfo = true,
+            updateIntervalMinutes = existing.updateIntervalMinutes.takeIf { it > 0 }
+                ?: Subscription.DEFAULT_UPDATE_INTERVAL_MINUTES
+        )
+        if (adopted != existing) persist(adopted)
+        val stale = forceRefresh || adopted.url != existing.url || adopted.lastUpdatedMs <= 0 || profilesOf(adopted.id).isEmpty()
+        return if (stale) refresh(adopted.id) else ImportResult(adopted, profilesOf(adopted.id).size)
+    }
+
     /**
      * Create or update a folder from the editor.
      *

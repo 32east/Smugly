@@ -40,12 +40,13 @@ object HevSocks5Tunnel {
         mapDns: Boolean = false,
         mapDnsAddress: String = MAPDNS_ADDRESS,
         /** Drop non-DNS UDP at hev (QUIC noise, etc.). DNS itself is handled by mapdns when on. */
-        rejectNonDnsUdp: Boolean = false
+        rejectNonDnsUdp: Boolean = false,
+        mtu: Int = 1500
     ): Result<Unit> {
         if (!loaded) return Result.failure(IllegalStateException("hev-socks5-tunnel is not loaded"))
         if (isRunning()) stop()
         val config = buildConfig(
-            socksAddress, socksPort, username, password, udpMode, mapDns, mapDnsAddress
+            socksAddress, socksPort, username, password, udpMode, mapDns, mapDnsAddress, mtu
         )
         AppLog.i(
             TAG,
@@ -85,11 +86,12 @@ object HevSocks5Tunnel {
         password: String?,
         udpMode: String,
         mapDns: Boolean,
-        mapDnsAddress: String
+        mapDnsAddress: String,
+        mtu: Int
     ): String = buildString {
         val udp = if (udpMode == "udp") "udp" else "tcp"
         appendLine("tunnel:")
-        appendLine("  mtu: 1500")
+        appendLine("  mtu: $mtu")
         appendLine("  ipv4: 10.255.0.2")
         appendLine("  ipv6: 'fd00::2'")
         appendLine()

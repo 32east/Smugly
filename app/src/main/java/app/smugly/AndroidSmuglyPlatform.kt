@@ -157,11 +157,7 @@ class AndroidSmuglyPlatform(
         ConfigStore.save(activity, c)
         connecting = true
         publish()
-        if (c.mode == Config.Mode.VPN ||
-            c.protocol == Config.TunnelProtocol.S3FU ||
-            c.protocol == Config.TunnelProtocol.CDNFU ||
-            c.protocol == Config.TunnelProtocol.XRAY
-        ) {
+        if (c.needsVpnService()) {
             val prep = VpnService.prepare(activity)
             if (prep != null) {
                 vpnLauncher.launch(prep)
@@ -223,7 +219,7 @@ class AndroidSmuglyPlatform(
                     choice.transport.name.lowercase()
                 ).getOrThrow()
                 MiniSlipstreamSocksBridge.start(
-                    listenHost = "127.0.0.1",
+                    listenHost = XrayConfigBuilder.listenAddress(global.allowLan),
                     listenPort = bridgePort,
                     slipstreamHost = "127.0.0.1",
                     slipstreamPort = slipstreamPort,
@@ -534,6 +530,11 @@ class AndroidSmuglyPlatform(
     override fun formatXrayJson(json: String): String? =
         runCatching { JSONObject(json).toString(2) }.getOrNull()
 
+    override fun xrayFormToJson(form: app.smugly.XrayForm, socksPort: Int): String? =
+        runCatching { app.smugly.XrayFormCodec.toJson(form, socksPort) }.getOrNull()
+
+    override fun xrayFormFromJson(json: String): app.smugly.XrayForm? = app.smugly.XrayFormCodec.fromJson(json)
+
     override fun localDnsResolver(): String? =
         ResolverSelector.preferredLocalResolver(activity)
 
@@ -629,6 +630,12 @@ class AndroidSmuglyPlatform(
         }
 
     override fun supportsAppUpdates(): Boolean = true
+
+    override fun supportsTunTuning(): Boolean = true
+
+    override fun supportsAutoConnectOnBoot(): Boolean = true
+
+    override fun defaultConnectionMode(): Config.Mode = Config.Mode.VPN
 
     override fun installedVersionName(): String = AppUpdater.installedVersion(activity)
 
@@ -750,11 +757,130 @@ class AndroidSmuglyPlatform(
         // "does this work, and how does it feel" instead of "does the server's port answer". The
         // probe pool bounds how many tunnels "measure the whole folder" starts at once; the
         // callback arrives on a probe thread and the UI hops it back itself.
-        app.smugly.net.E2ELatencyProbe.submit(profile.config, probeEngines, onResult)
+        app.smugly.net.E2ELatencyProbe.submit(profile.config, probeEngines) { result ->
+            result
+                .onSuccess { AppLog.i("LatencyProbe", "${profile.name}: ${it}ms") }
+                .onFailure { AppLog.w("LatencyProbe", "${profile.name}: ${it.message ?: it::class.java.simpleName}") }
+            onResult(result)
+        }
     }
 
     private val probeEngines by lazy { app.smugly.net.AndroidProbeEngines(activity) }
 
     override fun looksLikeSubscription(text: String): Boolean =
         app.smugly.subscription.SubscriptionManager.looksLikeSubscription(text)
+
+    private val accountWakeListeners = CopyOnWriteArrayList<() -> Unit>()
+
+    fun notifyAccountWake() {
+        handler.post { accountWakeListeners.forEach { it() } }
+    }
+
+    override fun observeAccountWake(onWake: () -> Unit): () -> Unit {
+        accountWakeListeners.add(onWake)
+        return { accountWakeListeners.remove(onWake) }
+    }
+
+    private val accountService by lazy {
+        app.smugly.account.AccountService(
+            object : app.smugly.account.AccountService.Port {
+                private val prefs get() = activity.getSharedPreferences(ACCOUNT_PREFS, android.content.Context.MODE_PRIVATE)
+
+                override fun loadSession(): String? = prefs.getString(ACCOUNT_KEY_SESSION, null)
+
+                override fun saveSession(json: String?) {
+                    val editor = prefs.edit()
+                    if (json == null) editor.remove(ACCOUNT_KEY_SESSION) else editor.putString(ACCOUNT_KEY_SESSION, json)
+                    editor.commit()
+                }
+
+                override fun loadMirrors(): String? = prefs.getString(ACCOUNT_KEY_MIRRORS, null)
+
+                override fun saveMirrors(json: String) {
+                    prefs.edit().putString(ACCOUNT_KEY_MIRRORS, json).apply()
+                }
+
+                override fun repository() = subscriptions
+
+                override fun fetchRoutes() = this@AndroidSmuglyPlatform.fetchRoutes()
+
+                override fun deviceName(): String {
+                    val named = runCatching {
+                        android.provider.Settings.Global.getString(activity.contentResolver, "device_name")
+                    }.getOrNull()?.trim().orEmpty()
+                    if (named.isNotEmpty()) return named
+                    val maker = android.os.Build.MANUFACTURER.orEmpty().replaceFirstChar { it.uppercase() }
+                    val model = android.os.Build.MODEL.orEmpty()
+                    return if (model.startsWith(maker, ignoreCase = true)) model else "$maker $model".trim()
+                }
+
+                override fun beforeManagedProfilesRemoved(profileIds: Set<String>) {
+                    val active = ConfigStore.activeProfileId(activity)
+                    if (active != null && active in profileIds && (isRunning() || connecting)) {
+                        handler.post { stopAll(reconnect = false) }
+                    }
+                }
+
+                override fun afterManagedAccessReissued(profileIds: Set<String>) {
+                    val active = ConfigStore.activeProfileId(activity)
+                    if (active != null && active in profileIds && (isRunning() || connecting)) {
+                        handler.post { stopAll(reconnect = true) }
+                    }
+                }
+            }
+        )
+    }
+
+    override fun account(): app.smugly.account.AccountApi = accountService
+
+    override fun hasEmbeddedWebCabinet(): Boolean = true
+
+    override fun openWebCabinet(url: String, externalLoginUrl: String?) {
+        CabinetActivity.onWake = { notifyAccountWake() }
+        CabinetActivity.upstream = {
+            if (isRunning()) {
+                val global = ConfigStore.loadGlobalSettings(activity)
+                app.smugly.net.LocalConnectProxy.Upstream.Socks(
+                    port = global.listenPort,
+                    username = global.localSocksUsername.takeIf { global.localSocksAuthEnabled },
+                    password = global.localSocksPassword.takeIf { global.localSocksAuthEnabled }
+                )
+            } else {
+                app.smugly.net.LocalConnectProxy.Upstream.Direct
+            }
+        }
+        handler.post {
+            runCatching {
+                activity.startActivity(
+                    Intent(activity, CabinetActivity::class.java)
+                        .putExtra(CabinetActivity.EXTRA_URL, url)
+                        .putExtra(CabinetActivity.EXTRA_EXTERNAL_LOGIN_URL, externalLoginUrl)
+                )
+            }.onFailure { toast(it.message ?: "cannot open") }
+        }
+    }
+
+    override fun closeWebCabinet() {
+        handler.post { CabinetActivity.closeIfOpen() }
+    }
+
+    override fun isWebCabinetOpen(): Boolean = CabinetActivity.isOpen()
+
+    override fun forgetWebCabinetSession() {
+        handler.post { CabinetActivity.forgetSession() }
+    }
+
+    override fun takeOAuthCode(): String? = OAuthReturnActivity.takeCode()
+
+    override fun openExternalUrl(url: String) {
+        handler.post {
+            runCatching {
+                activity.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+            }.onFailure { toast(it.message ?: "cannot open") }
+        }
+    }
 }
+
+private const val ACCOUNT_PREFS = "smugly_account"
+private const val ACCOUNT_KEY_SESSION = "session"
+private const val ACCOUNT_KEY_MIRRORS = "mirrors"

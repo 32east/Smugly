@@ -43,8 +43,19 @@ class ComposeMainActivity : ComponentActivity() {
         handleImportIntent(intent)
     }
 
+    override fun onResume() {
+        super.onResume()
+        if (::platform.isInitialized) platform.notifyAccountWake()
+    }
+
     private fun handleImportIntent(intent: Intent?) {
         val data = intent?.data ?: return
+        if (data.scheme.equals("smugly", ignoreCase = true) &&
+            (data.host.equals("account", ignoreCase = true) || data.host.equals("external-login", ignoreCase = true))
+        ) {
+            platform.notifyAccountWake()
+            return
+        }
         val text = extractImportText(intent, data) ?: return
 
         // Hand the URL to Compose so it can show "Importing…" and run the same path as

@@ -29,6 +29,7 @@ object AppLog {
         fileLoggingEnabled = isFileLoggingEnabled(context)
         if (fileLoggingEnabled) {
             startFlusher()
+            NativeLogTap.start()
             i("AppLog", "log initialized (file logging on)")
         }
     }
@@ -45,12 +46,15 @@ object AppLog {
             .edit()
             .putBoolean(KEY_FILE_LOGGING_ENABLED, enabled)
             .apply()
+        val wasEnabled = fileLoggingEnabled
         fileLoggingEnabled = enabled
         if (!enabled) {
+            NativeLogTap.stop()
             synchronized(lock) { pending.setLength(0) }
         } else {
             startFlusher()
-            i("AppLog", "file logging enabled")
+            NativeLogTap.start()
+            if (!wasEnabled) i("AppLog", "file logging enabled")
         }
     }
 
@@ -75,11 +79,20 @@ object AppLog {
         }
     }
 
+    fun mirror(priority: Int, tag: String, message: String) {
+        if (!fileLoggingEnabled) return
+        append(priority, tag, message, null)
+    }
+
     private fun write(priority: Int, tag: String, message: String, error: Throwable?) {
         if (!fileLoggingEnabled && priority < android.util.Log.WARN) return
         android.util.Log.println(priority, tag, message)
         if (error != null) android.util.Log.e(tag, message, error)
         if (!fileLoggingEnabled) return
+        append(priority, tag, message, error)
+    }
+
+    private fun append(priority: Int, tag: String, message: String, error: Throwable?) {
         var shouldFlush = priority >= android.util.Log.ERROR
         synchronized(lock) {
             pending.append(stamp.format(Date()))

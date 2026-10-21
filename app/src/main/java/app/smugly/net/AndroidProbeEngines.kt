@@ -4,10 +4,15 @@ import android.content.Context
 import app.smugly.Config
 import app.smugly.ResolverSelector
 import app.smugly.XrayConfigBuilder
+import app.smugly.effectiveCdnfuToml
+import app.smugly.effectiveS3fuToml
+import app.smugly.tunnel.CdnfuBridge
 import app.smugly.tunnel.ResolverListConfig
+import app.smugly.tunnel.S3fuBridge
 import app.smugly.tunnel.SlipstreamBridge
 import app.smugly.tunnel.XrayBridge
 import app.smugly.util.AppLog
+import java.io.File
 import java.net.InetSocketAddress
 import java.net.Socket
 
@@ -16,9 +21,7 @@ import java.net.Socket
  *
  * Every engine here runs *beside* the live tunnel rather than instead of it: measuring a row's
  * latency while connected must not drop the connection. That is why Xray gets its own core
- * instance and Slipstream uses the probe-client entry point (which is keyed by listen port), and
- * also why s3fu / cdnfu are declined — their native side keeps one client per process, so probing
- * one would tear down whatever is running.
+ * instance and Slipstream, s3fu and cdnfu use their probe-client entry points (keyed by listen port).
  */
 class AndroidProbeEngines(context: Context) : E2ELatencyProbe.Launcher {
     private val appContext = context.applicationContext
@@ -26,25 +29,99 @@ class AndroidProbeEngines(context: Context) : E2ELatencyProbe.Launcher {
     override fun supports(protocol: Config.TunnelProtocol): Boolean = when (protocol) {
         Config.TunnelProtocol.XRAY -> XrayBridge.isLoaded()
         Config.TunnelProtocol.SLIPSTREAM -> SlipstreamBridge.isLoaded()
-        // One native client per process: starting a probe would stop the user's tunnel.
-        Config.TunnelProtocol.S3FU, Config.TunnelProtocol.CDNFU -> false
+        Config.TunnelProtocol.S3FU -> S3fuBridge.isLoaded()
+        Config.TunnelProtocol.CDNFU -> CdnfuBridge.isLoaded()
     }
 
     override fun readyTimeoutMs(protocol: Config.TunnelProtocol): Long = when (protocol) {
         // Xray binds its inbound during startLoop; anything past a second means it did not start.
         Config.TunnelProtocol.XRAY -> 5_000
+        Config.TunnelProtocol.S3FU, Config.TunnelProtocol.CDNFU -> 5_000
         // A DNS tunnel has a QUIC handshake to finish over a carrier that is slow by design. Kept
         // close to the resolver selector's own 5s probe budget because a dead candidate costs this
         // whole timeout before the next one is tried.
         else -> 8_000
     }
 
+    override fun variants(config: Config): List<Config> {
+        if (config.protocol != Config.TunnelProtocol.SLIPSTREAM || config.resolverMode != Config.ResolverMode.AUTO) {
+            return listOf(config)
+        }
+        return ResolverSelector.probeResolverCandidates(appContext, config)
+            .map { it.transport }
+            .distinct()
+            .map { config.copy(resolverTransport = it) }
+            .ifEmpty { listOf(config) }
+    }
+
     override fun launch(config: Config, socksPort: Int): E2ELatencyProbe.Session =
         when (config.protocol) {
             Config.TunnelProtocol.XRAY -> launchXray(config, socksPort)
             Config.TunnelProtocol.SLIPSTREAM -> launchSlipstream(config, socksPort)
-            else -> error("${config.protocol} cannot be probed end to end on Android")
+            Config.TunnelProtocol.S3FU -> launchS3fu(config, socksPort)
+            Config.TunnelProtocol.CDNFU -> launchCdnfu(config, socksPort)
         }
+
+    private fun launchS3fu(config: Config, socksPort: Int): E2ELatencyProbe.Session {
+        val listen = "127.0.0.1:$socksPort"
+        S3fuBridge.startProbe(config.effectiveS3fuToml(), listen, caBundle(socksPort)).getOrThrow()
+        return nativeProbeSession(
+            socksPort,
+            isRunning = { S3fuBridge.isProbeRunning(listen) },
+            lastError = { S3fuBridge.probeLastError(listen) },
+            stop = { S3fuBridge.stopProbe(listen) }
+        )
+    }
+
+    private fun launchCdnfu(config: Config, socksPort: Int): E2ELatencyProbe.Session {
+        val listen = "127.0.0.1:$socksPort"
+        CdnfuBridge.startProbe(config.effectiveCdnfuToml(), listen).getOrThrow()
+        return nativeProbeSession(
+            socksPort,
+            isRunning = { CdnfuBridge.isProbeRunning(listen) },
+            lastError = { CdnfuBridge.probeLastError(listen) },
+            stop = { CdnfuBridge.stopProbe(listen) }
+        )
+    }
+
+    private fun nativeProbeSession(
+        socksPort: Int,
+        isRunning: () -> Boolean,
+        lastError: () -> String?,
+        stop: () -> Unit
+    ): E2ELatencyProbe.Session = object : E2ELatencyProbe.Session {
+        override fun awaitReady(timeoutMs: Long): Boolean {
+            val deadline = System.currentTimeMillis() + timeoutMs
+            while (System.currentTimeMillis() < deadline) {
+                if (!isRunning()) {
+                    lastError()?.let { error(it) }
+                    return false
+                }
+                if (awaitPort(socksPort, READY_POLL_MS)) return true
+            }
+            return false
+        }
+
+        override fun close() {
+            runCatching(stop)
+        }
+    }
+
+    private fun caBundle(socksPort: Int): String {
+        val out = File(appContext.filesDir, "cacert.pem")
+        if (out.length() > 0L) return out.absolutePath
+        val tmp = File(appContext.filesDir, "cacert.pem.$socksPort")
+        runCatching {
+            appContext.assets.open("cacert.pem").use { input ->
+                tmp.outputStream().use { output -> input.copyTo(output) }
+            }
+            if (!tmp.renameTo(out)) tmp.delete()
+        }.onFailure {
+            tmp.delete()
+            AppLog.e(TAG, "cacert.pem copy failed", it)
+        }
+        return if (out.length() > 0L) out.absolutePath else ""
+    }
 
     private fun launchXray(config: Config, socksPort: Int): E2ELatencyProbe.Session {
         require(config.xrayConfigJson.isNotBlank()) { "the profile has no Xray configuration" }
@@ -77,7 +154,8 @@ class AndroidProbeEngines(context: Context) : E2ELatencyProbe.Launcher {
         val domain = config.domain.trim()
         require(domain.isNotEmpty()) { "the profile has no tunnel domain" }
         val candidates = ResolverSelector.probeResolverCandidates(appContext, config)
-            .take(MAX_RESOLVER_CANDIDATES)
+            .filter { config.resolverMode != Config.ResolverMode.AUTO || it.transport == config.resolverTransport }
+            .take(if (config.resolverMode == Config.ResolverMode.AUTO) 1 else MAX_RESOLVER_CANDIDATES)
         require(candidates.isNotEmpty()) { "no resolver to try — set one, or connect once on this network" }
 
         // Only one candidate can hold the port at a time, so they are tried in turn and the first

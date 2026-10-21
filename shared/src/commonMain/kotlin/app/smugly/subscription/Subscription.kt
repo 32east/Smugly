@@ -48,7 +48,8 @@ data class Subscription(
      */
     val categories: List<SubscriptionCategory> = emptyList(),
     /** Message from the last failed refresh; blank when the last refresh worked. */
-    val lastError: String = ""
+    val lastError: String = "",
+    val managed: Boolean = false
 ) {
     companion object {
         const val DEFAULT_UPDATE_INTERVAL_MINUTES = 24L * 60

@@ -36,6 +36,10 @@ if [ -d "$SRC/app/build/s3fuJniLibs" ]; then
   mkdir -p "$DST/app/build/s3fuJniLibs"
   cp -a "$SRC/app/build/s3fuJniLibs/." "$DST/app/build/s3fuJniLibs/" || true
 fi
+if [ -d "$SRC/app/build/cdnfuJniLibs" ]; then
+  mkdir -p "$DST/app/build/cdnfuJniLibs"
+  cp -a "$SRC/app/build/cdnfuJniLibs/." "$DST/app/build/cdnfuJniLibs/" || true
+fi
 
 echo "sdk.dir=/home/reil/android-sdk" > "$DST/local.properties"
 export ANDROID_HOME=/home/reil/android-sdk
@@ -49,6 +53,7 @@ export PATH="/home/reil/.cargo/bin:$PATH"
 ./gradlew :app:assembleDebug --no-daemon \
   -x cargoBuildArm64 \
   -x cargoBuildS3fu \
+  -x cargoBuildCdnfu \
   -x buildXrayAar \
   2>&1 | tee /tmp/slipstream-apk-build.log | tail -150
 ls -la app/build/outputs/apk/debug/ || true

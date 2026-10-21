@@ -272,4 +272,65 @@ class ResolverSelectorTest {
             ResolverSelector.clearNetworkTransportPreferenceForTests(context)
         }
     }
+
+    @Test
+    fun an_unmeasured_switch_to_the_other_transport_drops_the_measurement() {
+        val config = testConfig(domain = "switch.example.com")
+        ResolverSelector.rememberTransport(context, config, "1.2.3.4", Config.ResolverTransport.TCP, 16)
+        ResolverSelector.rememberTransport(context, config, "1.2.3.4", Config.ResolverTransport.UDP)
+
+        val cached = ResolverSelector.loadResolverCache(context, config)
+            ?.resolvers
+            ?.firstOrNull { it.host == "1.2.3.4" }
+        assertEquals(Config.ResolverTransport.UDP, cached?.transport)
+        assertEquals(0L, cached?.validatedAt)
+    }
+
+    @Test
+    fun reconnecting_on_the_measured_transport_keeps_the_measurement() {
+        val config = testConfig(domain = "same.example.com")
+        ResolverSelector.rememberTransport(context, config, "1.2.3.4", Config.ResolverTransport.TCP, 16)
+        val measuredAt = ResolverSelector.loadResolverCache(context, config)
+            ?.resolvers?.firstOrNull { it.host == "1.2.3.4" }?.validatedAt
+        ResolverSelector.rememberTransport(context, config, "1.2.3.4", Config.ResolverTransport.TCP)
+
+        val cached = ResolverSelector.loadResolverCache(context, config)
+            ?.resolvers
+            ?.firstOrNull { it.host == "1.2.3.4" }
+        assertTrue((measuredAt ?: 0L) > 0L)
+        assertEquals(measuredAt, cached?.validatedAt)
+    }
+
+    @Test
+    fun latency_probe_tries_the_measured_transport_first_then_the_other_one() {
+        ResolverSelector.clearNetworkTransportPreferenceForTests(context)
+        val config = testConfig(domain = "probe.example.com")
+        ResolverSelector.rememberTransport(context, config, "1.2.3.4", Config.ResolverTransport.TCP, 16)
+
+        val candidates = ResolverSelector.probeResolverCandidates(context, config)
+
+        assertEquals(
+            listOf(
+                ResolverSelector.ProbeCandidate("1.2.3.4", 53, Config.ResolverTransport.TCP),
+                ResolverSelector.ProbeCandidate("1.2.3.4", 53, Config.ResolverTransport.UDP)
+            ),
+            candidates.take(2)
+        )
+    }
+
+    @Test
+    fun latency_probe_without_a_measurement_offers_both_transports_for_every_host() {
+        ResolverSelector.clearNetworkTransportPreferenceForTests(context)
+        val config = testConfig(domain = "fresh.example.com")
+
+        val candidates = ResolverSelector.probeResolverCandidates(context, config)
+
+        assertTrue(candidates.isNotEmpty())
+        candidates.groupBy { it.host }.values.forEach { perHost ->
+            assertEquals(
+                listOf(Config.ResolverTransport.UDP, Config.ResolverTransport.TCP),
+                perHost.map { it.transport }
+            )
+        }
+    }
 }

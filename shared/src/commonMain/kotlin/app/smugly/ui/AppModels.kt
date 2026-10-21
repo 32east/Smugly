@@ -59,7 +59,8 @@ data class LatencyUi(
 data class EditorDraft(
     val profileId: String?,
     val name: String,
-    val config: Config
+    val config: Config,
+    val xrayForm: app.smugly.XrayForm = app.smugly.XrayForm()
 )
 
 /**
@@ -137,6 +138,8 @@ interface SmuglyPlatform {
     fun observePendingImport(onImport: (String) -> Unit): () -> Unit = { }
     fun validateXrayConfig(json: String): String?
     fun formatXrayJson(json: String): String?
+    fun xrayFormToJson(form: app.smugly.XrayForm, socksPort: Int): String? = null
+    fun xrayFormFromJson(json: String): app.smugly.XrayForm? = null
     fun localDnsResolver(): String?
 
     // ---- split tunnelling (per-app proxy) ----
@@ -161,6 +164,12 @@ interface SmuglyPlatform {
     // release itself. Platforms that install some other way leave these inert.
 
     fun supportsAppUpdates(): Boolean = false
+
+    fun supportsTunTuning(): Boolean = false
+
+    fun supportsAutoConnectOnBoot(): Boolean = false
+
+    fun defaultConnectionMode(): Config.Mode = Config.Mode.PROXY
 
     /** Version actually installed — not the constant compiled into the UI. */
     fun installedVersionName(): String = AppVersion.name
@@ -245,6 +254,24 @@ interface SmuglyPlatform {
 
     /** True when [text] should be treated as a subscription rather than a single config. */
     fun looksLikeSubscription(text: String): Boolean = false
+
+    fun account(): app.smugly.account.AccountApi? = null
+
+    fun hasEmbeddedWebCabinet(): Boolean = false
+
+    fun openWebCabinet(url: String, externalLoginUrl: String? = null) = openExternalUrl(url)
+
+    fun closeWebCabinet() {}
+
+    fun isWebCabinetOpen(): Boolean = false
+
+    fun forgetWebCabinetSession() {}
+
+    fun takeOAuthCode(): String? = null
+
+    fun openExternalUrl(url: String) {}
+
+    fun observeAccountWake(onWake: () -> Unit): () -> Unit = { }
 }
 
 fun emptyDraft(base: Config = defaultConfig(mode = Config.Mode.PROXY)): EditorDraft =
@@ -275,7 +302,7 @@ fun defaultGlobalSettings(mode: Config.Mode = Config.Mode.PROXY): GlobalSettings
         fileLogging = false,
         trafficNotification = false,
         localSocksAuthEnabled = true,
-        localSocksUsername = "slipstream",
+        localSocksUsername = GlobalSettings.DEFAULT_LOCAL_SOCKS_USERNAME,
         localSocksPassword = "changeme",
         language = AppLanguage.SYSTEM,
         dnsResolverPool = DnsResolverPool.DEFAULT_RAW

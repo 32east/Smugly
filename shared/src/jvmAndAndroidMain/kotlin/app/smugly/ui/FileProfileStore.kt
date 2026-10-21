@@ -143,7 +143,7 @@ class FileProfileStore(
             fileLogging = json.optBoolean("fileLogging", false),
             trafficNotification = json.optBoolean("trafficNotification", false),
             localSocksAuthEnabled = json.optBoolean("localSocksAuthEnabled", true),
-            localSocksUsername = json.optString("localSocksUsername", "smugly"),
+            localSocksUsername = json.optString("localSocksUsername", app.smugly.GlobalSettings.DEFAULT_LOCAL_SOCKS_USERNAME),
             localSocksPassword = json.optString("localSocksPassword", "changeme"),
             language = runCatching {
                 app.smugly.AppLanguage.valueOf(json.optString("language", "SYSTEM"))
@@ -164,7 +164,11 @@ class FileProfileStore(
             }.getOrDefault(app.smugly.PerAppMode.OFF),
             perAppPackages = app.smugly.PerAppPackages.decode(json.optString("perAppPackages", "")),
             autoUpdate = json.optBoolean("autoUpdate", true)
-        )
+        ).let { base ->
+            app.smugly.ExtraSettingsCodec.decode(base) { key ->
+                if (json.has(key) && !json.isNull(key)) json.get(key).toString() else null
+            }
+        }
     }
 
     fun saveGlobalSettings(settings: GlobalSettings) {
@@ -188,6 +192,7 @@ class FileProfileStore(
             .put("perAppMode", settings.perAppMode.name)
             .put("perAppPackages", app.smugly.PerAppPackages.encode(settings.perAppPackages))
             .put("autoUpdate", settings.autoUpdate)
+        app.smugly.ExtraSettingsCodec.encode(settings).forEach { (key, value) -> json.put(key, value) }
         settingsFile.writeText(json.toString(2))
     }
 }

@@ -68,7 +68,7 @@ object ResolverSelector {
     // Operator-level DNS transport preference (UDP vs TCP). Keyed by networkSignature only -- not by
     // domain/resolver -- because carriers cut one transport wholesale (Tele2/T2: UDP dead or ~1 KB/s;
     // Beeline: TCP filtered) independent of which recursive IP we point at.
-    private const val NETWORK_TRANSPORT_PREFS = "network_transport_v1"
+    private const val NETWORK_TRANSPORT_PREFS = "network_transport_v2"
     private const val NETWORK_TRANSPORT_TTL_MS = 7L * 24L * 60L * 60L * 1000L
     private const val CONNECT_TIMEOUT_MS = 1200
     private const val CAPTIVE_CHECK_TIMEOUT_MS = 1500
@@ -384,10 +384,17 @@ object ResolverSelector {
             ?.resolvers
             ?.sortedBy { it.totalMs }
             .orEmpty()
-        val fromCache = cached.map { ProbeCandidate(it.host, port, it.transport, it.qnameMtu) }
         val pool = runCatching { resolverPoolCandidates(context) }.getOrDefault(emptyList())
-            .map { ProbeCandidate(it, port, Config.ResolverTransport.UDP) }
-        return (fromCache + pool).distinctBy { it.host }
+        val networkOrder = transportProbeOrder(context)
+        val now = System.currentTimeMillis()
+        return (cached.map { it.host } + pool).distinct().flatMap { host ->
+            val entry = cached.firstOrNull { it.host == host }
+            val measured = entry?.takeIf {
+                it.validatedAt > 0L && now - it.validatedAt in 0..TRANSPORT_VALIDATION_TTL_MS
+            }?.transport
+            val order = if (measured == null) networkOrder else listOf(measured) + networkOrder.filter { it != measured }
+            order.map { ProbeCandidate(host, port, it, entry?.qnameMtu ?: 0) }
+        }
     }
 
     fun choose(context: Context, config: Config, reason: String, skipHosts: Set<String> = emptySet()): ResolverChoice {
@@ -786,6 +793,7 @@ object ResolverSelector {
         }.getOrDefault(emptyList())
         val now = System.currentTimeMillis()
         val prior = existing.firstOrNull { it.host == cleanHost }
+        val keepsMeasurement = !resetValidation && (qtype != 0 || prior?.transport == transport)
         val updatedEntry = CachedResolver(
             host = cleanHost,
             totalMs = prior?.totalMs ?: Long.MAX_VALUE,
@@ -798,7 +806,7 @@ object ResolverSelector {
                 else -> prior?.qtype ?: 0
             },
             validatedAt = when {
-                resetValidation -> 0L
+                !keepsMeasurement -> 0L
                 qtype != 0 -> now
                 else -> prior?.validatedAt ?: 0L
             }

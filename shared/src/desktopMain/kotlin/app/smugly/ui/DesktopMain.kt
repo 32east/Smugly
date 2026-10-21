@@ -151,6 +151,7 @@ fun main() {
                 "skiko.renderApi=${System.getProperty("skiko.renderApi")}"
             )
             val platform = DesktopPlatform()
+            remember { app.smugly.Strings.set(platform.loadGlobalSettings().language) }
             val shortcuts = remember { AppShortcuts() }
             // Set once the frame exists; the close handler needs it and runs before the content.
             val frame = remember { arrayOfNulls<java.awt.Window>(1) }
@@ -199,7 +200,7 @@ fun main() {
                 undecorated = true,
                 state = windowState,
                 onCloseRequest = { closeWindow() },
-                title = "Smugly",
+                title = app.smugly.t(app.smugly.S.APP_NAME),
                 // Ctrl+V pastes a profile from the clipboard. This is onKeyEvent, not
                 // onPreviewKeyEvent, so a focused text field gets the key first and its own paste
                 // still works — the shortcut only fires when nothing is being typed into.
@@ -287,7 +288,7 @@ fun main() {
                     } else {
                         Column(Modifier.fillMaxSize()) {
                             WindowChrome(
-                                title = "Smugly",
+                                title = app.smugly.t(app.smugly.S.APP_NAME),
                                 maximized = maximized,
                                 onMinimize = { windowState.isMinimized = true },
                                 onToggleMaximize = { toggleMaximize(window) },

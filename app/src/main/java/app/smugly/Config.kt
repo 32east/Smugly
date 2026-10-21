@@ -22,6 +22,7 @@ object ConfigStore {
     private const val KEY_GLOBAL_TRAFFIC_NOTIFICATION = "globalTrafficNotification"
     private const val KEY_GLOBAL_LOCAL_SOCKS_AUTH = "globalLocalSocksAuth"
     private const val KEY_GLOBAL_LOCAL_SOCKS_USERNAME = "globalLocalSocksUsername"
+    private const val KEY_GLOBAL_LOCAL_SOCKS_USERNAME_MIGRATED = "globalLocalSocksUsernameMigrated"
     private const val KEY_GLOBAL_LOCAL_SOCKS_PASSWORD = "globalLocalSocksPassword"
     private const val KEY_GLOBAL_LANGUAGE = "globalLanguage"
     private const val KEY_GLOBAL_HOME_FOLDER_INDEX = "globalHomeFolderIndex"
@@ -32,6 +33,7 @@ object ConfigStore {
     private const val KEY_GLOBAL_PER_APP_PACKAGES = "globalPerAppPackages"
     private const val KEY_GLOBAL_AUTO_UPDATE = "globalAutoUpdate"
     private const val KEY_GLOBAL_DNS_RESOLVER_POOL = "globalDnsResolverPool"
+    private const val KEY_GLOBAL_EXT_PREFIX = "globalExt."
 
     fun load(context: Context): Config {
         val p = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
@@ -88,6 +90,7 @@ object ConfigStore {
             // derived config and the operator's edits do nothing.
             s3fuToml = p.getString("s3fuToml", "") ?: "",
             cdnfuToml = p.getString("cdnfuToml", "") ?: "",
+            xrayManual = p.getBoolean("xrayManual", false),
         )
     }
 
@@ -149,6 +152,10 @@ object ConfigStore {
     fun replaceProfiles(context: Context, profiles: List<ConfigProfile>) {
         val active = activeProfileId(context)
         val keep = if (profiles.any { it.id == active }) active.orEmpty() else profiles.firstOrNull()?.id.orEmpty()
+        val next = profiles.firstOrNull { it.id == keep }
+        if (next != null && (keep != active || loadProfiles(context).firstOrNull { it.id == keep }?.config != next.config)) {
+            saveLegacy(context, next.config)
+        }
         writeProfiles(context, profiles, keep)
     }
 
@@ -217,9 +224,18 @@ object ConfigStore {
 
     fun loadGlobalSettings(context: Context): GlobalSettings {
         val p = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-        val username = p.getString(KEY_GLOBAL_LOCAL_SOCKS_USERNAME, null)
-            ?.takeIf { it.isNotBlank() }
-            ?: "slipstream"
+        val stored = p.getString(KEY_GLOBAL_LOCAL_SOCKS_USERNAME, null)?.takeIf { it.isNotBlank() }
+        val username = if (!p.getBoolean(KEY_GLOBAL_LOCAL_SOCKS_USERNAME_MIGRATED, false)) {
+            val migrated = stored?.takeUnless { it == GlobalSettings.LEGACY_LOCAL_SOCKS_USERNAME }
+                ?: GlobalSettings.DEFAULT_LOCAL_SOCKS_USERNAME
+            p.edit()
+                .putString(KEY_GLOBAL_LOCAL_SOCKS_USERNAME, migrated)
+                .putBoolean(KEY_GLOBAL_LOCAL_SOCKS_USERNAME_MIGRATED, true)
+                .apply()
+            migrated
+        } else {
+            stored ?: GlobalSettings.DEFAULT_LOCAL_SOCKS_USERNAME
+        }
         val password = p.getString(KEY_GLOBAL_LOCAL_SOCKS_PASSWORD, null)
             ?.takeIf { it.isNotBlank() }
             ?: randomPassword().also {
@@ -262,7 +278,9 @@ object ConfigStore {
             ),
             perAppPackages = PerAppPackages.decode(p.getString(KEY_GLOBAL_PER_APP_PACKAGES, "")),
             autoUpdate = p.getBoolean(KEY_GLOBAL_AUTO_UPDATE, true)
-        )
+        ).let { base ->
+            ExtraSettingsCodec.decode(base) { key -> p.getString(KEY_GLOBAL_EXT_PREFIX + key, null) }
+        }
     }
 
     fun saveGlobalSettings(context: Context, settings: GlobalSettings) {
@@ -272,7 +290,7 @@ object ConfigStore {
             .putBoolean(KEY_GLOBAL_FILE_LOGGING, settings.fileLogging)
             .putBoolean(KEY_GLOBAL_TRAFFIC_NOTIFICATION, settings.trafficNotification)
             .putBoolean(KEY_GLOBAL_LOCAL_SOCKS_AUTH, settings.localSocksAuthEnabled)
-            .putString(KEY_GLOBAL_LOCAL_SOCKS_USERNAME, settings.localSocksUsername.ifBlank { "slipstream" })
+            .putString(KEY_GLOBAL_LOCAL_SOCKS_USERNAME, settings.localSocksUsername.ifBlank { GlobalSettings.DEFAULT_LOCAL_SOCKS_USERNAME })
             .putString(KEY_GLOBAL_LOCAL_SOCKS_PASSWORD, settings.localSocksPassword.ifBlank { randomPassword() })
             .putString(KEY_GLOBAL_LANGUAGE, settings.language.name)
             .putString(KEY_GLOBAL_DNS_RESOLVER_POOL, DnsResolverPool.normalize(settings.dnsResolverPool))
@@ -288,6 +306,11 @@ object ConfigStore {
             .putBoolean(KEY_GLOBAL_AUTO_UPDATE, settings.autoUpdate)
             .putInt("listenPort", settings.listenPort)
             .putString("mode", settings.mode.name)
+            .also { editor ->
+                ExtraSettingsCodec.encode(settings).forEach { (key, value) ->
+                    editor.putString(KEY_GLOBAL_EXT_PREFIX + key, value)
+                }
+            }
             .apply()
         app.smugly.util.AppLog.setFileLoggingEnabled(context, settings.fileLogging)
     }
@@ -754,6 +777,7 @@ object ConfigStore {
             .putInt("cdnfuMultipath", config.cdnfuMultipath)
             .putString("s3fuToml", config.s3fuToml)
             .putString("cdnfuToml", config.cdnfuToml)
+            .putBoolean("xrayManual", config.xrayManual)
             .apply()
     }
 
@@ -827,6 +851,7 @@ object ConfigStore {
             // parsed the config correctly and then threw it away on write.
             .put("s3fuToml", config.s3fuToml)
             .put("cdnfuToml", config.cdnfuToml)
+            .put("xrayManual", config.xrayManual)
 
     private fun configFromJson(json: JSONObject): Config =
         Config(
@@ -868,6 +893,7 @@ object ConfigStore {
             cdnfuMultipath = json.optInt("cdnfuMultipath", 4).coerceIn(0, 32),
             s3fuToml = json.optString("s3fuToml", ""),
             cdnfuToml = json.optString("cdnfuToml", ""),
+            xrayManual = json.optBoolean("xrayManual", false),
         )
 
     private inline fun <reified T : Enum<T>> enumValue(value: String?, fallback: T): T =

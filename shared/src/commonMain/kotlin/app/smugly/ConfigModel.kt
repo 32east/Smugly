@@ -72,7 +72,8 @@ data class Config(
      */
     val s3fuToml: String = "",
     /** As [s3fuToml], for cdn-fuckup (`cdnfu --config`). */
-    val cdnfuToml: String = ""
+    val cdnfuToml: String = "",
+    val xrayManual: Boolean = false
 ) {
     enum class Mode { PROXY, VPN }
     enum class AuthMode { NO_AUTH, LOGIN_PASSWORD }
@@ -81,6 +82,9 @@ data class Config(
     enum class ResolverPathMode { RECURSIVE, AUTHORITATIVE }
     enum class TunnelProtocol { SLIPSTREAM, S3FU, XRAY, CDNFU }
 }
+
+fun Config.needsVpnService(): Boolean =
+    mode == Config.Mode.VPN || protocol != Config.TunnelProtocol.SLIPSTREAM
 
 data class ConfigProfile(
     val id: String,
@@ -182,8 +186,37 @@ data class GlobalSettings(
      * Look for a newer release on start-up. On by default: the app ships as an APK on GitHub
      * rather than through a store, so nothing else would ever tell the user a fix exists.
      */
-    val autoUpdate: Boolean = true
-)
+    val autoUpdate: Boolean = true,
+    val tun: TunSettings = TunSettings(),
+    val routing: RoutingSettings = RoutingSettings(),
+    val autoConnectOnBoot: Boolean = false,
+    val allowLan: Boolean = false
+) {
+    companion object {
+        const val DEFAULT_LOCAL_SOCKS_USERNAME = "smugly"
+        const val LEGACY_LOCAL_SOCKS_USERNAME = "slipstream"
+    }
+}
+
+data class TunSettings(
+    val mtu: Int = DEFAULT_MTU,
+    val ipv6: Boolean = true,
+    val bypassLan: Boolean = false,
+    val dnsServers: String = ""
+) {
+    companion object {
+        const val DEFAULT_MTU = 1500
+        const val MIN_MTU = 1280
+        const val MAX_MTU = 9000
+    }
+}
+
+data class RoutingSettings(
+    val directRu: Boolean = false,
+    val blockAds: Boolean = false
+) {
+    val isActive: Boolean get() = directRu || blockAds
+}
 
 /**
  * [GlobalSettings.collapsedCategories] as one stored string, and back. Ids are slugs and UUIDs, so
@@ -195,6 +228,88 @@ object CollapsedCategories {
     fun decode(raw: String?): Set<String> =
         raw.orEmpty().lineSequence().map { it.trim() }.filter { it.isNotEmpty() }.toSet()
 }
+
+object ExtraSettingsCodec {
+    private const val TUN_MTU = "tunMtu"
+    private const val TUN_IPV6 = "tunIpv6"
+    private const val TUN_BYPASS_LAN = "tunBypassLan"
+    private const val TUN_DNS = "tunDnsServers"
+    private const val ROUTE_DIRECT_RU = "routeDirectRu"
+    private const val ROUTE_BLOCK_ADS = "routeBlockAds"
+    private const val AUTO_CONNECT_ON_BOOT = "autoConnectOnBoot"
+    private const val ALLOW_LAN = "allowLan"
+
+    val keys: List<String> = listOf(
+        TUN_MTU, TUN_IPV6, TUN_BYPASS_LAN, TUN_DNS,
+        ROUTE_DIRECT_RU, ROUTE_BLOCK_ADS, AUTO_CONNECT_ON_BOOT, ALLOW_LAN
+    )
+
+    fun encode(s: GlobalSettings): Map<String, String> = mapOf(
+        TUN_MTU to s.tun.mtu.toString(),
+        TUN_IPV6 to s.tun.ipv6.toString(),
+        TUN_BYPASS_LAN to s.tun.bypassLan.toString(),
+        TUN_DNS to s.tun.dnsServers,
+        ROUTE_DIRECT_RU to s.routing.directRu.toString(),
+        ROUTE_BLOCK_ADS to s.routing.blockAds.toString(),
+        AUTO_CONNECT_ON_BOOT to s.autoConnectOnBoot.toString(),
+        ALLOW_LAN to s.allowLan.toString()
+    )
+
+    fun decode(base: GlobalSettings, read: (String) -> String?): GlobalSettings {
+        val tunDefaults = TunSettings()
+        val routingDefaults = RoutingSettings()
+        fun bool(key: String, default: Boolean): Boolean =
+            when (read(key)?.trim()?.lowercase()) {
+                "true" -> true
+                "false" -> false
+                else -> default
+            }
+        return base.copy(
+            tun = TunSettings(
+                mtu = read(TUN_MTU)?.trim()?.toIntOrNull()
+                    ?.takeIf { it in TunSettings.MIN_MTU..TunSettings.MAX_MTU }
+                    ?: tunDefaults.mtu,
+                ipv6 = bool(TUN_IPV6, tunDefaults.ipv6),
+                bypassLan = bool(TUN_BYPASS_LAN, tunDefaults.bypassLan),
+                dnsServers = read(TUN_DNS) ?: tunDefaults.dnsServers
+            ),
+            routing = RoutingSettings(
+                directRu = bool(ROUTE_DIRECT_RU, routingDefaults.directRu),
+                blockAds = bool(ROUTE_BLOCK_ADS, routingDefaults.blockAds)
+            ),
+            autoConnectOnBoot = bool(AUTO_CONNECT_ON_BOOT, false),
+            allowLan = bool(ALLOW_LAN, false)
+        )
+    }
+}
+
+fun GlobalSettings.needsReconnectToApply(next: GlobalSettings): Boolean =
+    mode != next.mode ||
+        listenPort != next.listenPort ||
+        localSocksAuthEnabled != next.localSocksAuthEnabled ||
+        localSocksUsername != next.localSocksUsername ||
+        localSocksPassword != next.localSocksPassword ||
+        dnsResolverPool != next.dnsResolverPool ||
+        appHttpProxy != next.appHttpProxy ||
+        tun != next.tun ||
+        routing != next.routing ||
+        allowLan != next.allowLan
+
+fun GlobalSettings.resetToDefaults(defaultMode: Config.Mode): GlobalSettings =
+    GlobalSettings(
+        listenPort = 1080,
+        mode = defaultMode,
+        fileLogging = false,
+        trafficNotification = false,
+        localSocksAuthEnabled = true,
+        localSocksUsername = localSocksUsername,
+        localSocksPassword = localSocksPassword,
+        homeFolderIndex = homeFolderIndex,
+        lastFolderId = lastFolderId,
+        collapsedCategories = collapsedCategories,
+        perAppMode = perAppMode,
+        perAppPackages = perAppPackages
+    )
 
 enum class AppLanguage { SYSTEM, EN, RU }
 

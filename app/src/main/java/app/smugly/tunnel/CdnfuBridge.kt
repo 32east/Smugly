@@ -88,10 +88,36 @@ object CdnfuBridge {
 
     fun lastError(): String? = if (loaded) runCatching { nativeLastError() }.getOrNull() else null
 
+    fun startProbe(configToml: String, socksListen: String): Result<Unit> {
+        if (!loaded) return Result.failure(IllegalStateException("libcdnfu is not loaded"))
+        val code = runCatching { nativeStartProbeToml(configToml, socksListen) }
+            .getOrElse { return Result.failure(it) }
+        return if (code == 0) {
+            Result.success(Unit)
+        } else {
+            Result.failure(RuntimeException(probeLastError(socksListen) ?: "cdnfu native error $code"))
+        }
+    }
+
+    fun stopProbe(socksListen: String) {
+        if (loaded) runCatching { nativeStopProbe(socksListen) }
+    }
+
+    fun isProbeRunning(socksListen: String): Boolean =
+        loaded && runCatching { nativeIsProbeRunning(socksListen) }.getOrDefault(false)
+
+    fun probeLastError(socksListen: String): String? =
+        if (loaded) runCatching { nativeProbeLastError(socksListen) }.getOrNull() else null
+
     private external fun nativeStartClientToml(
         configToml: String,
         socksListen: String
     ): Int
+
+    private external fun nativeStartProbeToml(configToml: String, socksListen: String): Int
+    private external fun nativeStopProbe(socksListen: String)
+    private external fun nativeIsProbeRunning(socksListen: String): Boolean
+    private external fun nativeProbeLastError(socksListen: String): String?
 
     private external fun nativeStopClient()
     private external fun nativeIsRunning(): Boolean

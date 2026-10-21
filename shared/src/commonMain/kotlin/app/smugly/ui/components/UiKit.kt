@@ -1,5 +1,7 @@
 package app.smugly.ui.components
 
+import kotlinx.coroutines.Job
+import kotlin.coroutines.coroutineContext
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.Animatable
@@ -40,7 +42,9 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.BasicText
 import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.text.TextAutoSize
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
@@ -57,6 +61,7 @@ import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CheckboxDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
+import androidx.compose.material3.LocalTextStyle
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -99,7 +104,6 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.zIndex
 import androidx.compose.ui.unit.sp
-import app.smugly.AppVersion
 import app.smugly.S
 import app.smugly.t
 import app.smugly.ui.theme.SmuglyAccent
@@ -269,13 +273,13 @@ fun MenuLayer(
 
 /** Menu row without Material hover flash — subtle soft fill only while hovered. */
 @Composable
-fun MenuRow(text: String, onClick: () -> Unit) {
+fun MenuRow(text: String, selected: Boolean = false, onClick: () -> Unit) {
     val interaction = remember { MutableInteractionSource() }
     val hovered by interaction.collectIsHoveredAsState()
     // fillMaxWidth is safe here: parent Column already has a finite max width (widthIn).
     Text(
         text = text,
-        color = SmuglyTextPrimary,
+        color = if (selected) SmuglyAccent else SmuglyTextPrimary,
         fontSize = 16.sp,
         maxLines = 1,
         modifier = Modifier
@@ -473,7 +477,9 @@ fun SmuglyTextField(
      */
     fillContainer: Boolean = false,
     /** Extra display transform (e.g. [JsonSyntaxHighlightTransformation]); ignored when [password]. */
-    visualTransformation: VisualTransformation = VisualTransformation.None
+    visualTransformation: VisualTransformation = VisualTransformation.None,
+    leading: (@Composable () -> Unit)? = null,
+    trailing: (@Composable () -> Unit)? = null
 ) {
     val shape = RoundedCornerShape(10.dp)
     // External modifier (e.g. fixed height) must sit on BasicTextField itself — not only on
@@ -504,20 +510,37 @@ fun SmuglyTextField(
         ),
         cursorBrush = SolidColor(SmuglyAccent),
         decorationBox = { inner ->
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .then(if (fillContainer) Modifier.fillMaxHeight() else Modifier)
-                    .clip(shape)
-                    .background(SmuglyInput)
-                    .border(1.dp, SmuglyStroke, shape)
-                    .padding(horizontal = 12.dp, vertical = 12.dp),
-                contentAlignment = if (singleLine) Alignment.CenterStart else Alignment.TopStart
-            ) {
-                if (value.isEmpty() && hint.isNotEmpty()) {
-                    Text(hint, color = SmuglyTextMuted, fontSize = 15.sp)
+            val chrome = Modifier
+                .fillMaxWidth()
+                .then(if (fillContainer) Modifier.fillMaxHeight() else Modifier)
+                .clip(shape)
+                .background(SmuglyInput)
+                .border(1.dp, SmuglyStroke, shape)
+            val field = @Composable { modifier: Modifier ->
+                Box(
+                    modifier = modifier,
+                    contentAlignment = if (singleLine) Alignment.CenterStart else Alignment.TopStart
+                ) {
+                    if (value.isEmpty() && hint.isNotEmpty()) {
+                        Text(hint, color = SmuglyTextMuted, fontSize = 15.sp)
+                    }
+                    inner()
                 }
-                inner()
+            }
+            if (leading == null && trailing == null) {
+                field(chrome.padding(horizontal = 12.dp, vertical = 12.dp))
+            } else {
+                Row(
+                    modifier = chrome.padding(start = if (leading != null) 10.dp else 12.dp, end = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    if (leading != null) {
+                        leading()
+                        Spacer(Modifier.width(8.dp))
+                    }
+                    field(Modifier.weight(1f).padding(vertical = 12.dp))
+                    if (trailing != null) trailing() else Spacer(Modifier.width(8.dp))
+                }
             }
         }
     )
@@ -528,6 +551,7 @@ fun PillSelector(
     options: List<String>,
     selectedIndex: Int,
     modifier: Modifier = Modifier,
+    trackColor: Color = SmuglyCard,
     onSelected: (Int) -> Unit,
 ) {
     // One pill that slides between the options, rather than one pill per option fading in and
@@ -543,7 +567,7 @@ fun PillSelector(
         modifier = modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(12.dp))
-            .background(SmuglyCard)
+            .background(trackColor)
             .padding(3.dp)
     ) {
         Box(Modifier.matchParentSize()) {
@@ -575,13 +599,18 @@ fun PillSelector(
                         .padding(vertical = 10.dp, horizontal = 4.dp),
                     contentAlignment = Alignment.Center
                 ) {
-                    Text(
+                    BasicText(
                         text = label,
-                        color = textColor,
-                        fontSize = 12.sp,
-                        fontWeight = FontWeight.Normal,
+                        style = LocalTextStyle.current.merge(
+                            TextStyle(color = textColor, fontSize = 12.sp, fontWeight = FontWeight.Normal)
+                        ),
                         maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
+                        overflow = TextOverflow.Clip,
+                        autoSize = TextAutoSize.StepBased(
+                            minFontSize = 9.sp,
+                            maxFontSize = 12.sp,
+                            stepSize = 0.5.sp
+                        )
                     )
                 }
             }
@@ -739,7 +768,7 @@ private const val ProfileDragScale = 0.96f
 // Nothing measures rows by a constant any more (the reorder drag reads layoutInfo), so
 // these are free to change.
 private val ProfileCardIcon = 44.dp
-private val ProfileCardPadV = 7.dp
+private val ProfileCardPadV = 10.dp
 private val ProfileCardGap = 6.dp
 
 /** How long the card that just lost selection takes to go dark. Selecting itself is instant. */
@@ -891,6 +920,7 @@ fun ProfileCard(
             .then(
                 if (enableReorder) {
                     Modifier.pointerInput(Unit) {
+                        val gestureJob = coroutineContext[Job]
                         detectDragGesturesAfterLongPress(
                             onDragStart = { offset ->
                                 // One tick the moment the card is picked up, so reordering is
@@ -920,7 +950,14 @@ fun ProfileCard(
                             // after about a screen of travel; unpinning here would drop the item
                             // from composition and abort the reorder. The list host finishes the
                             // drag on finger-up and dispose releases the pin if the node is gone.
-                            onDragCancel = { dragCancelNow() }
+                            onDragCancel = {
+                                if (gestureJob?.isActive == true) {
+                                    unpin()
+                                    dragEndNow()
+                                } else {
+                                    dragCancelNow()
+                                }
+                            }
                         )
                     }
                 } else Modifier
@@ -988,7 +1025,8 @@ fun ProfileCard(
                     color = SmuglyTextSecondary,
                     fontSize = 13.sp,
                     maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.padding(top = 2.dp)
                 )
             }
         }
@@ -1075,14 +1113,16 @@ fun BottomConnectBar(
                     overflow = TextOverflow.Ellipsis,
                     lineHeight = 16.sp
                 )
-                Text(
-                    traffic,
-                    color = SmuglyTextSecondary,
-                    fontSize = 11.sp,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    lineHeight = 13.sp
-                )
+                if ((running || loading) && traffic.isNotBlank()) {
+                    Text(
+                        traffic,
+                        color = SmuglyTextSecondary,
+                        fontSize = 11.sp,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        lineHeight = 13.sp
+                    )
+                }
             }
         }
         Box(
@@ -1121,96 +1161,6 @@ fun BottomConnectBar(
                 )
             }
         }
-    }
-}
-
-@Composable
-fun DrawerPanel(
-    selected: AppDrawerItem,
-    showDiagnostics: Boolean,
-    onSelect: (AppDrawerItem) -> Unit,
-    modifier: Modifier = Modifier,
-    /** Split tunnelling — only where the platform routes per app (Android). */
-    showPerApp: Boolean = false,
-    /** Branding line under nav items, e.g. "0.1.0 · 2026-07-27". */
-    versionLabel: String = AppVersion.name + " · " + AppVersion.buildDate
-) {
-    val items = buildList {
-        add(AppDrawerItem.HOME)
-        if (showPerApp) add(AppDrawerItem.PER_APP)
-        if (showDiagnostics) add(AppDrawerItem.DIAGNOSTICS)
-        add(AppDrawerItem.SETTINGS)
-    }
-    Column(
-        modifier = modifier
-            .background(SmuglyCard)
-            .padding(top = 20.dp, bottom = 16.dp, start = 12.dp, end = 12.dp)
-    ) {
-        items.forEach { item ->
-            val isSelected = item == selected
-            val interaction = remember(item) { MutableInteractionSource() }
-            val hovered by interaction.collectIsHoveredAsState()
-            val bg = when {
-                isSelected -> SmuglyAccent.copy(alpha = 0.22f)
-                hovered -> SmuglyCardSoft
-                else -> Color.Transparent
-            }
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(vertical = 3.dp)
-                    .clip(RoundedCornerShape(12.dp))
-                    .background(bg)
-                    .hoverable(interaction)
-                    .pointerHoverIcon(PointerIcon.Hand)
-                    .clickable(
-                        interactionSource = interaction,
-                        indication = null,
-                        onClick = { onSelect(item) }
-                    )
-                    // Tall row (~52dp) so drawer items are easy to hit on phone.
-                    .padding(horizontal = 16.dp, vertical = 16.dp)
-            ) {
-                Text(
-                    text = item.label(),
-                    color = if (isSelected) SmuglyAccent else SmuglyTextPrimary,
-                    fontWeight = FontWeight.Normal,
-                    fontSize = 17.sp
-                )
-            }
-        }
-        Spacer(Modifier.weight(1f))
-        // Branding + version pinned to the bottom of the drawer.
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 12.dp, vertical = 8.dp)
-        ) {
-            Text(
-                "Smugly",
-                color = SmuglyTextPrimary,
-                fontWeight = FontWeight.Normal,
-                fontSize = 16.sp
-            )
-            Text(
-                versionLabel,
-                color = SmuglyTextMuted,
-                fontSize = 12.sp,
-                modifier = Modifier.padding(top = 4.dp)
-            )
-        }
-    }
-}
-
-enum class AppDrawerItem {
-    HOME, PER_APP, DIAGNOSTICS, SETTINGS;
-
-    @Composable
-    fun label(): String = when (this) {
-        HOME -> app.smugly.t(app.smugly.S.HOME)
-        PER_APP -> app.smugly.t(app.smugly.S.PER_APP)
-        DIAGNOSTICS -> app.smugly.t(app.smugly.S.DIAGNOSTICS)
-        SETTINGS -> app.smugly.t(app.smugly.S.SETTINGS)
     }
 }
 

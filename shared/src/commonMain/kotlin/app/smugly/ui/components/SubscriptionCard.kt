@@ -16,12 +16,15 @@ import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.PointerEventType
 import androidx.compose.ui.input.pointer.PointerIcon
+import androidx.compose.ui.input.pointer.PointerId
 import androidx.compose.ui.input.pointer.isSecondaryPressed
 import androidx.compose.ui.input.pointer.pointerHoverIcon
 import androidx.compose.ui.input.pointer.pointerInput
@@ -105,7 +108,10 @@ fun SubscriptionCard(
     onRefresh: () -> Unit,
     /** Spins the refresh icon and blocks re-taps while a fetch is in flight. */
     refreshing: Boolean = false,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    titleOverride: String? = null,
+    actionLabel: String? = null,
+    onAction: (() -> Unit)? = null
 ) {
     val info = subscription.info
     val expired = info.daysLeft(nowMs)?.let { it < 0 } == true
@@ -120,7 +126,8 @@ fun SubscriptionCard(
         Row(verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f)) {
                 Text(
-                    text = t(if (expired) S.SUBSCRIPTION_INACTIVE else S.SUBSCRIPTION_ACTIVE),
+                    text = titleOverride?.takeIf { !expired }
+                        ?: t(if (expired) S.SUBSCRIPTION_INACTIVE else S.SUBSCRIPTION_ACTIVE),
                     color = if (expired) SmuglyAccent else SmuglyTextPrimary,
                     fontSize = 16.sp,
                     fontWeight = FontWeight.Medium,
@@ -230,7 +237,7 @@ fun SubscriptionCard(
             )
         }
 
-        if (subscription.lastError.isNotBlank()) {
+        if (subscription.lastError.isNotBlank() && !subscription.managed) {
             Text(
                 text = subscription.lastError,
                 color = SmuglyAccent,
@@ -239,6 +246,10 @@ fun SubscriptionCard(
                 overflow = TextOverflow.Ellipsis,
                 modifier = Modifier.padding(top = 6.dp)
             )
+        }
+
+        if (actionLabel != null && onAction != null) {
+            SecondaryButton(actionLabel, onAction, Modifier.padding(top = 10.dp))
         }
     }
 }
@@ -408,6 +419,7 @@ fun FolderTabs(
     onMenuDismiss: () -> Unit = {},
     /** True while a tab is held: whoever owns competing horizontal gestures must stand down. */
     onDragActive: (Boolean) -> Unit = {},
+    onBackScrollableDown: (PointerId) -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     if (names.isEmpty()) return
@@ -427,6 +439,7 @@ fun FolderTabs(
     val moveNow by rememberUpdatedState(onMove)
     val menuDismissNow by rememberUpdatedState(onMenuDismiss)
     val dragActiveNow by rememberUpdatedState(onDragActive)
+    val backScrollableDownNow by rememberUpdatedState(onBackScrollableDown)
     val haptics = LocalHapticFeedback.current
     // Desktop: menu via right-click; long-press still reorders (same as phone).
     val isDesktop = remember { currentHostPlatform().isDesktop() }
@@ -567,6 +580,12 @@ fun FolderTabs(
         modifier = Modifier
             .fillMaxWidth()
             .onGloballyPositioned { rowWidth = it.size.width }
+            .pointerInput(Unit) {
+                awaitEachGesture {
+                    val down = awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
+                    if (rowScroll.canScrollBackward) backScrollableDownNow(down.id)
+                }
+            }
             // Only scrollable when the tabs actually overflow. A scrollable that has nothing
             // to scroll still competes for the same horizontal drag as the reorder gesture,
             // and it wins as soon as the finger moves — the row twitched sideways and the tab

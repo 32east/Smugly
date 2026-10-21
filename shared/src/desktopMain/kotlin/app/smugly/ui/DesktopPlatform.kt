@@ -520,6 +520,11 @@ class DesktopPlatform(
     override fun formatXrayJson(json: String): String? =
         runCatching { JSONObject(json).toString(2) }.getOrNull()
 
+    override fun xrayFormToJson(form: app.smugly.XrayForm, socksPort: Int): String? =
+        runCatching { app.smugly.XrayFormCodec.toJson(form, socksPort) }.getOrNull()
+
+    override fun xrayFormFromJson(json: String): app.smugly.XrayForm? = app.smugly.XrayFormCodec.fromJson(json)
+
     override fun localDnsResolver(): String? = null
 
     // ---- subscriptions ----
@@ -556,35 +561,37 @@ class DesktopPlatform(
                     }
                 }
 
-                override fun fetchRoutes(): List<app.smugly.subscription.SubscriptionFetcher.ProxySpec?> =
-                    buildList {
-                        // Both ways are tried: the panel may be blocked here (needs the tunnel)
-                        // or blocked at the tunnel's exit (needs a direct connection).
-                        if (DesktopTunnel.isRunning) {
-                            add(
-                                app.smugly.subscription.SubscriptionFetcher.ProxySpec(
-                                    "127.0.0.1",
-                                    store.loadGlobalSettings().listenPort
-                                )
-                            )
-                        }
-                        // Then whatever proxy the machine is already configured to use.
-                        if (app.smugly.desktop.WindowsSystemProxy.isWindows) {
-                            val snapshot = app.smugly.desktop.WindowsSystemProxy.snapshot()
-                            if (snapshot.enabled) {
-                                val hostPort = snapshot.server.substringAfterLast('=').trim()
-                                val host = hostPort.substringBeforeLast(':', "")
-                                val port = hostPort.substringAfterLast(':', "").toIntOrNull()
-                                if (host.isNotBlank() && port != null) {
-                                    add(app.smugly.subscription.SubscriptionFetcher.ProxySpec(host, port))
-                                }
-                            }
-                        }
-                        add(null) // direct, last
-                    }
+                override fun fetchRoutes() = subscriptionRoutes()
             }
         )
     }
+
+    private fun subscriptionRoutes(): List<app.smugly.subscription.SubscriptionFetcher.ProxySpec?> =
+        buildList {
+            // Both ways are tried: the panel may be blocked here (needs the tunnel)
+            // or blocked at the tunnel's exit (needs a direct connection).
+            if (DesktopTunnel.isRunning) {
+                add(
+                    app.smugly.subscription.SubscriptionFetcher.ProxySpec(
+                        "127.0.0.1",
+                        store.loadGlobalSettings().listenPort
+                    )
+                )
+            }
+            // Then whatever proxy the machine is already configured to use.
+            if (app.smugly.desktop.WindowsSystemProxy.isWindows) {
+                val snapshot = app.smugly.desktop.WindowsSystemProxy.snapshot()
+                if (snapshot.enabled) {
+                    val hostPort = snapshot.server.substringAfterLast('=').trim()
+                    val host = hostPort.substringBeforeLast(':', "")
+                    val port = hostPort.substringAfterLast(':', "").toIntOrNull()
+                    if (host.isNotBlank() && port != null) {
+                        add(app.smugly.subscription.SubscriptionFetcher.ProxySpec(host, port))
+                    }
+                }
+            }
+            add(null) // direct, last
+        }
 
     override fun loadSubscriptions() = subscriptions.list()
 
@@ -646,4 +653,74 @@ class DesktopPlatform(
 
     override fun looksLikeSubscription(text: String): Boolean =
         app.smugly.subscription.SubscriptionManager.looksLikeSubscription(text)
+
+    private val accountFile get() = File(app.smugly.platform.AppPaths.filesDir(), "account.json")
+
+    private val mirrorsFile get() = File(app.smugly.platform.AppPaths.filesDir(), "mirrors.json")
+
+    private val accountService by lazy {
+        app.smugly.account.AccountService(
+            object : app.smugly.account.AccountService.Port {
+                override fun loadSession(): String? =
+                    runCatching { accountFile.takeIf { it.exists() }?.readText() }.getOrNull()
+
+                override fun saveSession(json: String?) {
+                    runCatching {
+                        if (json == null) accountFile.delete() else accountFile.writeText(json)
+                    }
+                }
+
+                override fun loadMirrors(): String? =
+                    runCatching { mirrorsFile.takeIf { it.exists() }?.readText() }.getOrNull()
+
+                override fun saveMirrors(json: String) {
+                    runCatching { mirrorsFile.writeText(json) }
+                }
+
+                override fun repository() = subscriptions
+
+                override fun fetchRoutes() = subscriptionRoutes()
+
+                override fun deviceName(): String {
+                    val host = System.getenv("COMPUTERNAME")?.takeIf { it.isNotBlank() }
+                        ?: runCatching { java.net.InetAddress.getLocalHost().hostName }.getOrNull().orEmpty()
+                    val os = System.getProperty("os.name").orEmpty().ifBlank { "Desktop" }
+                    return if (host.isBlank()) os else "$os · $host"
+                }
+
+                override fun beforeManagedProfilesRemoved(profileIds: Set<String>) {
+                    if (store.loadActiveProfileId() in profileIds && (DesktopTunnel.isRunning || connecting)) {
+                        disconnect()
+                    }
+                }
+
+                override fun afterManagedAccessReissued(profileIds: Set<String>) {
+                    if (store.loadActiveProfileId() in profileIds && (DesktopTunnel.isRunning || connecting)) {
+                        disconnect()
+                        startConnection()
+                    }
+                }
+            }
+        )
+    }
+
+    override fun account(): app.smugly.account.AccountApi = accountService
+
+    override fun openExternalUrl(url: String) {
+        Thread({
+            val opened = runCatching {
+                if (java.awt.Desktop.isDesktopSupported() &&
+                    java.awt.Desktop.getDesktop().isSupported(java.awt.Desktop.Action.BROWSE)
+                ) {
+                    java.awt.Desktop.getDesktop().browse(java.net.URI(url))
+                    true
+                } else {
+                    false
+                }
+            }.getOrDefault(false)
+            if (!opened && app.smugly.desktop.WindowsSystemProxy.isWindows) {
+                runCatching { ProcessBuilder("rundll32", "url.dll,FileProtocolHandler", url).start() }
+            }
+        }, "smugly-open-url").apply { isDaemon = true }.start()
+    }
 }

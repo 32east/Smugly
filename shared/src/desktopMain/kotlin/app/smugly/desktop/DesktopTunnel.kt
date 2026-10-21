@@ -137,7 +137,7 @@ object DesktopTunnel {
                 else -> NON_SLIPSTREAM_MAX_CLIENTS
             }
             val server = MixedProxyServer(
-                listenHost = "127.0.0.1",
+                listenHost = app.smugly.XrayConfigBuilder.listenAddress(settings.allowLan),
                 listenPort = listenPort,
                 upstreamHost = "127.0.0.1",
                 upstreamPort = enginePort,
@@ -244,7 +244,7 @@ object DesktopTunnel {
             Config.TunnelProtocol.XRAY -> {
                 val exe = EngineBinaries.require("xray")
                 ensureXrayGeodata(exe.parentFile)
-                val cfg = writeXrayConfig(config, socksPort)
+                val cfg = writeXrayConfig(config, socksPort, settings)
                 // workingDir = engines/: xray resolves geoip.dat / geosite.dat relative to cwd.
                 EngineSpec("xray", listOf(exe.absolutePath, "run", "-c", cfg.absolutePath), exe.parentFile)
             }
@@ -279,7 +279,7 @@ object DesktopTunnel {
      * [MixedProxyServer], so Xray is moved to the engine port and given a plain SOCKS5 inbound.
      * Outbounds / routing / dns from the profile are untouched.
      */
-    private fun writeXrayConfig(c: Config, socksPort: Int): File {
+    private fun writeXrayConfig(c: Config, socksPort: Int, settings: GlobalSettings): File {
         require(c.xrayConfigJson.isNotBlank()) { "Xray configuration is empty" }
         val root = runCatching { JSONObject(c.xrayConfigJson) }
             .getOrElse { throw IllegalArgumentException("Xray config is not valid JSON: ${it.message}") }
@@ -287,7 +287,12 @@ object DesktopTunnel {
             "Xray config has no outbounds"
         }
         val f = File(engineConfigDir(), "xray-client.json")
-        f.writeText(app.smugly.XrayConfigBuilder.withOnlySocksInbound(c.xrayConfigJson, socksPort))
+        f.writeText(
+            app.smugly.XrayRouting.apply(
+                app.smugly.XrayConfigBuilder.withOnlySocksInbound(c.xrayConfigJson, socksPort),
+                settings.routing
+            )
+        )
         return f
     }
 

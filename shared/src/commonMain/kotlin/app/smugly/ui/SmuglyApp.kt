@@ -8,6 +8,8 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.input.pointer.PointerId
+import androidx.compose.ui.input.pointer.PointerType
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -40,13 +42,23 @@ import app.smugly.GlobalSettings
 import app.smugly.S
 import app.smugly.Strings
 import app.smugly.UpdateStatus
+import app.smugly.account.AccountLink
+import app.smugly.account.AccountLinkPoll
+import app.smugly.account.AccountSyncResult
+import app.smugly.account.SignOutReason
 import app.smugly.currentHostPlatform
 import app.smugly.defaultConfig
+import app.smugly.needsReconnectToApply
+import app.smugly.resetToDefaults
 import app.smugly.supportsLocalProxyAuth
 import app.smugly.supportsTrafficNotification
 import app.smugly.t
+import app.smugly.ui.components.AccountNoPlanPanel
+import app.smugly.ui.components.AccountPreparingPanel
 import app.smugly.ui.components.AppDrawerItem
 import app.smugly.ui.components.AppToast
+import app.smugly.ui.components.LinkWaitingDialog
+import app.smugly.ui.components.WelcomePanel
 import app.smugly.ui.components.ConfirmDialog
 import app.smugly.ui.components.CrashReportDialog
 import app.smugly.ui.components.DrawerPanel
@@ -60,9 +72,11 @@ import app.smugly.ui.screens.SettingsScreen
 import app.smugly.ui.theme.SmuglyBg
 import app.smugly.ui.theme.SmuglyTheme
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlin.math.abs
 
 /** Marker id used while adding a subscription that does not have an id yet. */
@@ -112,6 +126,7 @@ fun SmuglyApp(platform: SmuglyPlatform, shortcuts: AppShortcuts? = null) {
          * drawer-swipe cannot steal text selection or long-presses inside dialogs.
          */
         var blockDrawerGestures by remember { mutableStateOf(false) }
+        var drawerSwipeVeto by remember { mutableStateOf<PointerId?>(null) }
         var profiles by remember { mutableStateOf(ui.loadProfiles()) }
         var subscriptions by remember { mutableStateOf(ui.loadSubscriptions()) }
         /** Id of the subscription being fetched, or null when idle — drives the spinner. */
@@ -135,6 +150,7 @@ fun SmuglyApp(platform: SmuglyPlatform, shortcuts: AppShortcuts? = null) {
         var installedAppsLoading by remember { mutableStateOf(false) }
         /** "reconnect to apply" is worth saying once per session, not once per checkbox. */
         var perAppReconnectHinted by remember { mutableStateOf(false) }
+        var settingsReconnectHinted by remember { mutableStateOf(false) }
         var updateStatus by remember { mutableStateOf<UpdateStatus>(UpdateStatus.Idle) }
         /** Kept while the dialog animates out — see [UpdateDialog]. */
         var updateRelease by remember { mutableStateOf<AppRelease?>(null) }
@@ -145,6 +161,18 @@ fun SmuglyApp(platform: SmuglyPlatform, shortcuts: AppShortcuts? = null) {
         /** 0 = editor fully on-screen, 1 = parked off to the right. */
         val editorSlide = remember { Animatable(1f) }
         var uiTick by remember { mutableStateOf(0) }
+        val account = remember(ui) { ui.account() }
+        var accountSnapshot by remember { mutableStateOf(account?.snapshot()) }
+        var signedIn by remember { mutableStateOf(account?.isSignedIn() == true) }
+        var trialDaysHint by remember { mutableStateOf(account?.trialDays()) }
+        var accountLink by remember { mutableStateOf<AccountLink?>(null) }
+        var linkDialogVisible by remember { mutableStateOf(false) }
+        var accountBusy by remember { mutableStateOf(false) }
+        var signingOut by remember { mutableStateOf(false) }
+        var accountWatchUntilMs by remember { mutableStateOf(0L) }
+        var accountWakeTick by remember { mutableStateOf(0) }
+        val accountWakeSignal = remember { Channel<Unit>(Channel.CONFLATED) }
+        var signOutDialogVisible by remember { mutableStateOf(false) }
 
         DisposableEffect(ui) {
             val stopConnect = ui.observeConnect { connect = it }
@@ -291,6 +319,166 @@ fun SmuglyApp(platform: SmuglyPlatform, shortcuts: AppShortcuts? = null) {
             onDispose { stop() }
         }
 
+        fun managedReady(): Boolean {
+            val id = account?.managedSubscriptionId() ?: return false
+            return profiles.any { it.subscriptionId == id }
+        }
+
+        fun applyAccountSync(result: AccountSyncResult, announceOffline: Boolean) {
+            when (result) {
+                is AccountSyncResult.Ready -> {
+                    val wasReady = managedReady()
+                    signedIn = true
+                    accountSnapshot = result.snapshot
+                    if (result.folderChanged) reloadProfiles()
+                    val nowReady = result.snapshot.plan != null && managedReady()
+                    if (nowReady && !wasReady) {
+                        focusFolderId = account?.managedSubscriptionId()
+                        accountWatchUntilMs = 0
+                        ui.closeWebCabinet()
+                        ui.toast(t(S.TOAST_SUBSCRIPTION_READY))
+                    } else if (result.accessReissued) {
+                        ui.toast(t(S.TOAST_ACCESS_REISSUED))
+                    }
+                }
+                is AccountSyncResult.SignedOut -> {
+                    signedIn = false
+                    accountSnapshot = null
+                    ui.forgetWebCabinetSession()
+                    reloadProfiles()
+                    ui.toast(
+                        t(
+                            when (result.reason) {
+                                SignOutReason.ACCOUNT_GONE -> S.TOAST_ACCOUNT_GONE
+                                SignOutReason.BANNED -> S.TOAST_ACCOUNT_BANNED
+                                SignOutReason.SESSION_INVALID -> S.TOAST_SESSION_EXPIRED
+                                SignOutReason.USER -> S.TOAST_SIGNED_OUT
+                            }
+                        )
+                    )
+                }
+                AccountSyncResult.NotSignedIn -> {
+                    if (signedIn || accountSnapshot != null) {
+                        signedIn = false
+                        accountSnapshot = null
+                    }
+                }
+                is AccountSyncResult.Offline -> if (announceOffline) ui.toast(t(S.TOAST_SERVER_UNREACHABLE))
+            }
+        }
+
+        suspend fun runAccountSync(announceOffline: Boolean = false) {
+            val api = account ?: return
+            val result = withContext(Dispatchers.Default) { api.sync() }
+            applyAccountSync(result, announceOffline)
+        }
+
+        fun startAccountLink(register: Boolean) {
+            val api = account ?: return
+            if (accountBusy) return
+            accountBusy = true
+            scope.launch {
+                val link = withContext(Dispatchers.Default) { api.beginLink() }
+                accountBusy = false
+                link.onSuccess { l ->
+                    ui.takeOAuthCode()
+                    accountLink = l
+                    if (!ui.hasEmbeddedWebCabinet()) linkDialogVisible = true
+                    val url = if (register) l.browserUrl + "&smugly_tab=register" else l.browserUrl
+                    ui.openWebCabinet(url, l.browserUrl)
+                }.onFailure {
+                    ui.toast(t(S.TOAST_SERVER_UNREACHABLE))
+                }
+            }
+        }
+
+        fun openAccountCabinet() {
+            val api = account ?: return
+            if (!signedIn) {
+                startAccountLink(register = false)
+                return
+            }
+            if (accountBusy) return
+            accountBusy = true
+            scope.launch {
+                val url = withContext(Dispatchers.Default) { api.webCabinetUrl() }
+                accountBusy = false
+                url.onSuccess {
+                    accountWatchUntilMs = app.smugly.platform.PlatformTime.currentTimeMillis() + ACCOUNT_WATCH_MS
+                    ui.openWebCabinet(it, null)
+                }.onFailure {
+                    ui.toast(t(S.TOAST_SERVER_UNREACHABLE))
+                }
+            }
+        }
+
+        fun cancelAccountLink() {
+            accountLink = null
+            linkDialogVisible = false
+        }
+
+        DisposableEffect(ui) {
+            val stop = ui.observeAccountWake {
+                accountWakeTick++
+                accountWakeSignal.trySend(Unit)
+            }
+            onDispose { stop() }
+        }
+
+        LaunchedEffect(accountLink, accountWakeTick) {
+            val api = account ?: return@LaunchedEffect
+            val link = accountLink ?: return@LaunchedEffect
+            while (accountLink === link) {
+                if (link.expired(app.smugly.platform.PlatformTime.currentTimeMillis())) {
+                    cancelAccountLink()
+                    ui.closeWebCabinet()
+                    ui.toast(t(S.TOAST_LINK_EXPIRED))
+                    break
+                }
+                ui.takeOAuthCode()?.let { code ->
+                    val confirmed = withContext(Dispatchers.Default) { api.confirmOAuth(link, code) }
+                    if (!confirmed) ui.toast(t(S.TOAST_LINK_EXPIRED))
+                }
+                when (val poll = withContext(Dispatchers.Default) { api.pollLink(link) }) {
+                    is AccountLinkPoll.Linked -> {
+                        cancelAccountLink()
+                        signedIn = true
+                        accountWatchUntilMs = app.smugly.platform.PlatformTime.currentTimeMillis() + ACCOUNT_WATCH_MS
+                        ui.toast(t(S.TOAST_ACCOUNT_SIGNED_IN))
+                        scope.launch { runAccountSync(announceOffline = true) }
+                    }
+                    is AccountLinkPoll.Failed -> {
+                        cancelAccountLink()
+                        ui.toast(poll.message)
+                    }
+                    AccountLinkPoll.Pending -> delay(2_000)
+                }
+            }
+        }
+
+        LaunchedEffect(Unit) {
+            if (account != null && !signedIn) runAccountSync()
+        }
+
+        LaunchedEffect(signedIn, accountWakeTick) {
+            if (account == null || !signedIn) return@LaunchedEffect
+            while (true) {
+                runAccountSync()
+                if (!signedIn) break
+                val now = app.smugly.platform.PlatformTime.currentTimeMillis()
+                val preparing = accountSnapshot?.plan != null && !managedReady()
+                val fast = accountWatchUntilMs > now || preparing || ui.isWebCabinetOpen()
+                withTimeoutOrNull(if (fast) 4_000 else 10 * 60_000L) { accountWakeSignal.receive() }
+            }
+        }
+
+        LaunchedEffect(signedIn) {
+            val api = account ?: return@LaunchedEffect
+            if (!signedIn && trialDaysHint == null) {
+                trialDaysHint = withContext(Dispatchers.Default) { api.fetchTrialDays() }
+            }
+        }
+
         fun requestDeleteProfile(p: ConfigProfile) {
             // Deleting everything is allowed — the list then shows an "import a configuration"
             // hint instead of forcing a placeholder profile to exist.
@@ -310,18 +498,11 @@ fun SmuglyApp(platform: SmuglyPlatform, shortcuts: AppShortcuts? = null) {
             screen = to
         }
 
-        /**
-         * Persist a split-tunnelling change.
-         *
-         * The TUN's app filter is fixed at `establish()`, so an edit made while connected only
-         * lands on the next connect. Said once per visit rather than on every tick — the screen
-         * carries the same sentence permanently, this is just the nudge for someone who is
-         * looking at the checkbox and not at the hint.
-         */
         fun savePerApp(next: GlobalSettings) {
+            val appAdded = (next.perAppPackages - settings.perAppPackages).isNotEmpty()
             settings = next
             ui.saveGlobalSettings(next)
-            if ((connect.running || connect.connecting) && !perAppReconnectHinted) {
+            if (appAdded && (connect.running || connect.connecting) && !perAppReconnectHinted) {
                 perAppReconnectHinted = true
                 ui.toast(t(S.TOAST_PER_APP_RECONNECT))
             }
@@ -374,7 +555,7 @@ fun SmuglyApp(platform: SmuglyPlatform, shortcuts: AppShortcuts? = null) {
         val contentShiftPx = progress * contentShiftMaxPx
         val scrimAlpha = progress * 0.45f
 
-        fun animateDrawerTo(open: Boolean, durationMs: Int = 240) {
+        fun animateDrawerTo(open: Boolean, durationMs: Int = 240, delayMs: Int = 0) {
             if (open) dismissKeyboard()
             drawerOpen = open
             scope.launch {
@@ -382,13 +563,13 @@ fun SmuglyApp(platform: SmuglyPlatform, shortcuts: AppShortcuts? = null) {
                 drawerProgress.stop()
                 drawerProgress.animateTo(
                     if (open) 1f else 0f,
-                    animationSpec = tween(durationMs, easing = FastOutSlowInEasing)
+                    animationSpec = tween(durationMs, delayMillis = delayMs, easing = FastOutSlowInEasing)
                 )
             }
         }
 
         fun openDrawer() = animateDrawerTo(true, 260)
-        fun closeDrawer(durationMs: Int = 240) = animateDrawerTo(false, durationMs)
+        fun closeDrawer(durationMs: Int = 240, delayMs: Int = 0) = animateDrawerTo(false, durationMs, delayMs)
         /**
          * Item pick:
          * 1) flip tab visibility (keep-alive — no heavy first compose if already visited);
@@ -396,8 +577,14 @@ fun SmuglyApp(platform: SmuglyPlatform, shortcuts: AppShortcuts? = null) {
          */
         fun selectFromDrawer(item: AppDrawerItem) {
             dismissKeyboard()
+            if (item == AppDrawerItem.WEB_CABINET) {
+                closeDrawer(durationMs = 260, delayMs = DRAWER_PICK_CLOSE_DELAY_MS)
+                openAccountCabinet()
+                return
+            }
             val target = when (item) {
                 AppDrawerItem.HOME -> AppScreen.HOME
+                AppDrawerItem.WEB_CABINET -> null
                 AppDrawerItem.PER_APP ->
                     if (ui.supportsPerAppProxy()) AppScreen.PER_APP else null
                 AppDrawerItem.DIAGNOSTICS ->
@@ -405,16 +592,19 @@ fun SmuglyApp(platform: SmuglyPlatform, shortcuts: AppShortcuts? = null) {
                 AppDrawerItem.SETTINGS -> AppScreen.SETTINGS
             } ?: return
             goFromDrawer(target)
-            closeDrawer(durationMs = 260)
+            closeDrawer(durationMs = 260, delayMs = DRAWER_PICK_CLOSE_DELAY_MS)
         }
 
         // System Back / Esc: drawer → close; editor → home; any non-Home tab → home.
         PlatformBackHandler(
-            enabled = drawerOpen || drawerProgress.value > 0.05f ||
+            enabled = linkDialogVisible || signOutDialogVisible ||
+                drawerOpen || drawerProgress.value > 0.05f ||
                 editor != null ||
                 screen != AppScreen.HOME
         ) {
             when {
+                linkDialogVisible -> cancelAccountLink()
+                signOutDialogVisible -> signOutDialogVisible = false
                 drawerOpen || drawerProgress.value > 0.05f -> closeDrawer()
                 editor != null -> leaveEditor()
                 screen != AppScreen.HOME -> goFromDrawer(AppScreen.HOME)
@@ -429,8 +619,6 @@ fun SmuglyApp(platform: SmuglyPlatform, shortcuts: AppShortcuts? = null) {
          * regardless, since the drawer itself is under the finger by then. Off while the profile
          * editor is up.
          */
-        // Opening is edge-only: a full-content Initial-pass drag stole horizontal text selection
-        // (long-press + drag in a TextField) and made the drawer shoot out as a "side menu".
         val drawerEdgePx = with(density) { 28.dp.toPx() }
         val drawerSwipeModifier = Modifier.pointerInput(
             editor != null,
@@ -441,6 +629,7 @@ fun SmuglyApp(platform: SmuglyPlatform, shortcuts: AppShortcuts? = null) {
         ) {
             if (editor != null || blockDrawerGestures) return@pointerInput
             val slop = viewConfiguration.touchSlop
+            val longPressMs = viewConfiguration.longPressTimeoutMillis
             awaitEachGesture {
                 // Everything here runs on the **Initial** pass. Pointer events reach the innermost
                 // handler first on the Main pass, so a Main-pass gesture never saw the drag at
@@ -451,12 +640,13 @@ fun SmuglyApp(platform: SmuglyPlatform, shortcuts: AppShortcuts? = null) {
                     requireUnconsumed = false,
                     pass = PointerEventPass.Initial
                 )
+                drawerSwipeVeto = null
                 val startProgress = drawerProgress.value
                 val openedAtStart = startProgress > 0.5f
                 if (!openedAtStart && !swipeOpensDrawer) return@awaitEachGesture
-                // Closed drawer: only the left edge may start an open-swipe. Closing still works
-                // from anywhere (the drawer is under the finger by then).
-                if (!openedAtStart && down.position.x > drawerEdgePx) return@awaitEachGesture
+                if (!openedAtStart && down.type == PointerType.Mouse && down.position.x > drawerEdgePx) {
+                    return@awaitEachGesture
+                }
                 var dragged = 0f
                 var claimed = false
                 while (true) {
@@ -468,7 +658,9 @@ fun SmuglyApp(platform: SmuglyPlatform, shortcuts: AppShortcuts? = null) {
                         // Give a vertical scroll away immediately; wait out the slop otherwise.
                         if (abs(total.y) > slop && abs(total.y) > abs(total.x)) break
                         if (abs(total.x) <= slop) continue
-                        val opening = !openedAtStart && total.x > 0f
+                        val opening = !openedAtStart && total.x > 0f &&
+                            change.uptimeMillis - down.uptimeMillis < longPressMs &&
+                            drawerSwipeVeto != down.id
                         val closing = openedAtStart && total.x < 0f
                         if (!opening && !closing) break
                         claimed = true
@@ -580,14 +772,20 @@ fun SmuglyApp(platform: SmuglyPlatform, shortcuts: AppShortcuts? = null) {
                                 // Stored Xray configs are often one long line (that is how a panel
                                 // ships them); pretty-print on the way into the editor so it is
                                 // readable without the user asking.
-                                val config = if (p.config.protocol == Config.TunnelProtocol.XRAY) {
+                                var config = if (p.config.protocol == Config.TunnelProtocol.XRAY) {
                                     ui.formatXrayJson(p.config.xrayConfigJson)
                                         ?.let { p.config.copy(xrayConfigJson = it) }
                                         ?: p.config
                                 } else {
                                     p.config
                                 }
-                                openEditor(EditorDraft(p.id, p.name, config))
+                                val form = if (config.protocol == Config.TunnelProtocol.XRAY && config.xrayManual) {
+                                    ui.xrayFormFromJson(config.xrayConfigJson)
+                                } else {
+                                    null
+                                }
+                                if (form == null && config.xrayManual) config = config.copy(xrayManual = false)
+                                openEditor(EditorDraft(p.id, p.name, config, form ?: app.smugly.XrayForm()))
                             },
                             onDelete = { p -> requestDeleteProfile(p) },
                             onExport = { p ->
@@ -616,6 +814,7 @@ fun SmuglyApp(platform: SmuglyPlatform, shortcuts: AppShortcuts? = null) {
                             },
                             onFirstFolder = { swipeOpensDrawer = it },
                             onBlockDrawerGestures = { blockDrawerGestures = it },
+                            onDrawerSwipeVeto = { drawerSwipeVeto = it },
                             homeFolderIndex = settings.homeFolderIndex,
                             initialFolderId = settings.lastFolderId,
                             focusFolderId = focusFolderId,
@@ -715,6 +914,30 @@ fun SmuglyApp(platform: SmuglyPlatform, shortcuts: AppShortcuts? = null) {
                                 settings = next
                                 ui.saveGlobalSettings(next)
                                 reloadProfiles()
+                            },
+                            emptyState = if (account == null) null else { _ ->
+                                val snap = accountSnapshot
+                                when {
+                                    !signedIn -> WelcomePanel(
+                                        trialDays = trialDaysHint,
+                                        onBuy = { startAccountLink(register = true) },
+                                        onSignIn = { startAccountLink(register = false) }
+                                    )
+                                    snap?.plan != null -> AccountPreparingPanel()
+                                    else -> AccountNoPlanPanel(
+                                        accountName = snap?.profile?.name.orEmpty(),
+                                        trialAvailable = snap?.trialAvailable == true,
+                                        trialDays = snap?.trialDays ?: 0,
+                                        trialNeedsTelegram = snap?.trialNeedsTelegram == true,
+                                        onOpenCabinet = { openAccountCabinet() }
+                                    )
+                                }
+                            },
+                            managedIsTrial = accountSnapshot?.plan?.isTrial == true,
+                            onOpenWebCabinet = if (account != null && signedIn) {
+                                { openAccountCabinet() }
+                            } else {
+                                null
                             }
                         )
                     }
@@ -728,17 +951,44 @@ fun SmuglyApp(platform: SmuglyPlatform, shortcuts: AppShortcuts? = null) {
                             installedVersion = ui.installedVersionName(),
                             checkingUpdate = updateStatus is UpdateStatus.Checking,
                             onCheckUpdate = { ui.checkForUpdate() },
+                            accountName = if (account != null) accountSnapshot?.profile?.name.orEmpty() else null,
+                            signedIn = signedIn,
+                            onSignIn = { startAccountLink(register = false) },
+                            onSignOut = { signOutDialogVisible = true },
                             onMenu = { openDrawer() },
+                            showTunSettings = ui.supportsTunTuning(),
+                            showAutoConnect = ui.supportsAutoConnectOnBoot(),
+                            onBlockDrawerGestures = { blockDrawerGestures = it },
+                            onReset = {
+                                val fixed = settings.resetToDefaults(ui.defaultConnectionMode())
+                                val needsReconnect = settings.needsReconnectToApply(fixed)
+                                settings = fixed
+                                ui.saveGlobalSettings(fixed)
+                                Strings.set(fixed.language)
+                                uiTick++
+                                ui.toast(
+                                    if (needsReconnect && (connect.running || connect.connecting)) {
+                                        t(S.TOAST_SETTINGS_RESET) + ", " + t(S.TOAST_SETTINGS_RECONNECT)
+                                    } else {
+                                        t(S.TOAST_SETTINGS_RESET)
+                                    }
+                                )
+                            },
                             onChange = { next ->
                                 val fixed = if (ui.supportsSystemVpn()) next
                                 else next.copy(
                                     mode = Config.Mode.PROXY,
                                     trafficNotification = false
                                 )
+                                val needsReconnect = settings.needsReconnectToApply(fixed)
                                 settings = fixed
                                 ui.saveGlobalSettings(fixed)
                                 Strings.set(fixed.language)
                                 uiTick++
+                                if (needsReconnect && (connect.running || connect.connecting) && !settingsReconnectHinted) {
+                                    settingsReconnectHinted = true
+                                    ui.toast(t(S.TOAST_SETTINGS_RECONNECT))
+                                }
                             }
                         )
                     }
@@ -823,11 +1073,35 @@ fun SmuglyApp(platform: SmuglyPlatform, shortcuts: AppShortcuts? = null) {
                                     domain = d.config.domain.trim(),
                                     resolverHost = d.config.resolverHost.trim(),
                                     listenPort = settings.listenPort,
-                                    mode = settings.mode
+                                    mode = settings.mode,
+                                    xrayManual = d.config.xrayManual && d.config.protocol == Config.TunnelProtocol.XRAY
                                 )
                                 // Saving an Xray profile is where the config gets checked, now
                                 // that there is no "Check" button to forget to press. A bad
                                 // config never reaches storage, and a good one is stored tidy.
+                                if (clean.protocol == Config.TunnelProtocol.XRAY && clean.xrayManual) {
+                                    val form = d.xrayForm
+                                    val missing = when (form.missingField()) {
+                                        app.smugly.XrayForm.Field.ADDRESS -> S.TOAST_XRAY_NEED_ADDRESS
+                                        app.smugly.XrayForm.Field.PORT -> S.TOAST_XRAY_NEED_PORT
+                                        app.smugly.XrayForm.Field.SECRET -> when (form.protocol) {
+                                            app.smugly.XrayFormProtocol.VLESS, app.smugly.XrayFormProtocol.VMESS -> S.TOAST_XRAY_NEED_UUID
+                                            else -> S.TOAST_XRAY_NEED_PASSWORD
+                                        }
+                                        app.smugly.XrayForm.Field.PUBLIC_KEY -> S.TOAST_XRAY_NEED_PUBLIC_KEY
+                                        null -> null
+                                    }
+                                    if (missing != null) {
+                                        ui.toast(t(missing))
+                                        return@ProfileEditorScreen
+                                    }
+                                    val built = ui.xrayFormToJson(form, settings.listenPort)
+                                    if (built == null) {
+                                        ui.toast(t(S.TOAST_XRAY_CONFIG_EMPTY))
+                                        return@ProfileEditorScreen
+                                    }
+                                    clean = clean.copy(xrayConfigJson = built)
+                                }
                                 if (clean.protocol == Config.TunnelProtocol.XRAY) {
                                     val json = clean.xrayConfigJson
                                     if (json.isBlank()) {
@@ -883,7 +1157,9 @@ fun SmuglyApp(platform: SmuglyPlatform, shortcuts: AppShortcuts? = null) {
                                     )
                                 }
                             },
-                            formatXray = { ui.formatXrayJson(it) }
+                            formatXray = { ui.formatXrayJson(it) },
+                            xrayFormToJson = { ui.xrayFormToJson(it, settings.listenPort) },
+                            xrayFormFromJson = { ui.xrayFormFromJson(it) }
                         )
                     }
                 }
@@ -915,6 +1191,7 @@ fun SmuglyApp(platform: SmuglyPlatform, shortcuts: AppShortcuts? = null) {
                 },
                 showDiagnostics = settings.fileLogging,
                 showPerApp = ui.supportsPerAppProxy(),
+                showWebCabinet = account != null,
                 onSelect = { item -> selectFromDrawer(item) },
                 modifier = Modifier
                     .fillMaxHeight()
@@ -985,6 +1262,45 @@ fun SmuglyApp(platform: SmuglyPlatform, shortcuts: AppShortcuts? = null) {
                 message = t(S.SUBSCRIPTION_IMPORTING)
             )
 
+            LinkWaitingDialog(
+                visible = linkDialogVisible && accountLink != null,
+                onReopen = { accountLink?.let { ui.openWebCabinet(it.browserUrl, it.browserUrl) } },
+                onCancel = { cancelAccountLink() }
+            )
+
+            ConfirmDialog(
+                visible = signOutDialogVisible,
+                title = t(S.SIGN_OUT_TITLE),
+                message = t(S.SIGN_OUT_MESSAGE),
+                confirmLabel = t(S.SIGN_OUT_BTN),
+                cancelLabel = t(S.CANCEL_BTN),
+                onConfirm = {
+                    signOutDialogVisible = false
+                    val api = account
+                    if (api != null && !signingOut) {
+                        signingOut = true
+                        scope.launch {
+                            val started = app.smugly.platform.PlatformTime.currentTimeMillis()
+                            withContext(Dispatchers.Default) { api.signOut() }
+                            val spent = app.smugly.platform.PlatformTime.currentTimeMillis() - started
+                            if (spent < SIGN_OUT_MIN_SPINNER_MS) delay(SIGN_OUT_MIN_SPINNER_MS - spent)
+                            signingOut = false
+                            applyAccountSync(AccountSyncResult.SignedOut(SignOutReason.USER), false)
+                        }
+                    }
+                },
+                onDismiss = { signOutDialogVisible = false }
+            )
+
+            LoadingOverlay(
+                visible = accountBusy,
+                message = t(S.ACCOUNT_CONNECTING)
+            )
+            LoadingOverlay(
+                visible = signingOut,
+                message = t(S.ACCOUNT_SIGNING_OUT)
+            )
+
             // Toast: snap in, fade out.
             AppToast(visible = toastVisible, message = toastText.ifBlank { " " })
 
@@ -994,3 +1310,7 @@ fun SmuglyApp(platform: SmuglyPlatform, shortcuts: AppShortcuts? = null) {
 
 /** Separator for exported profile lists — one link per line. */
 private const val LINE_BREAK = "\n"
+
+private const val ACCOUNT_WATCH_MS = 20 * 60_000L
+private const val SIGN_OUT_MIN_SPINNER_MS = 700L
+private const val DRAWER_PICK_CLOSE_DELAY_MS = 15

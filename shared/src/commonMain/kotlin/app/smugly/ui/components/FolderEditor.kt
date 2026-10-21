@@ -144,8 +144,7 @@ fun FolderEditorDialog(
         }
 
         if (isNew && edited.createMode == FolderCreateMode.FROM_FILE) {
-            HintText(t(S.FOLDER_SOURCE_FILE_HINT))
-            Spacer(Modifier.height(12.dp))
+            Spacer(Modifier.height(8.dp))
             PrimaryButton(
                 text = t(S.FOLDER_PICK_FILE_BTN),
                 onClick = {
