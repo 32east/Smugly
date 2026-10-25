@@ -79,7 +79,7 @@ object HevSocks5Tunnel {
         )
     }
 
-    private fun buildConfig(
+    fun buildConfig(
         address: String,
         port: Int,
         username: String?,
@@ -87,13 +87,16 @@ object HevSocks5Tunnel {
         udpMode: String,
         mapDns: Boolean,
         mapDnsAddress: String,
-        mtu: Int
+        mtu: Int,
+        tunnelName: String? = null,
+        ipv6: Boolean = true
     ): String = buildString {
         val udp = if (udpMode == "udp") "udp" else "tcp"
         appendLine("tunnel:")
+        if (tunnelName != null) appendLine("  name: $tunnelName")
         appendLine("  mtu: $mtu")
         appendLine("  ipv4: 10.255.0.2")
-        appendLine("  ipv6: 'fd00::2'")
+        if (ipv6) appendLine("  ipv6: 'fd00::2'")
         appendLine()
         appendLine("socks5:")
         appendLine("  address: $address")

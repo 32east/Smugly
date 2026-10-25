@@ -13,6 +13,7 @@ import java.security.SecureRandom
 
 object ConfigStore {
     private const val PREFS = "config"
+    private const val TURNFU_CALL_KEY = "turnfu_call_link"
     private const val KEY_PROFILES = "profiles"
     private const val KEY_SUBSCRIPTIONS = "subscriptions"
     private const val KEY_ACTIVE_PROFILE_ID = "activeProfileId"
@@ -74,23 +75,19 @@ object ConfigStore {
             s3Prefix = p.getString("s3Prefix", "")?.takeIf { it.isNotBlank() } ?: "s3fu",
             s3Psk = p.getString("s3Psk", "") ?: "",
             xrayConfigJson = p.getString("xrayConfigJson", "") ?: "",
-            cdnfuUrl = p.getString("cdnfuUrl", "") ?: "",
-            cdnfuHost = p.getString("cdnfuHost", "") ?: "",
-            cdnfuPsk = p.getString("cdnfuPsk", "") ?: "",
-            cdnfuMimic = p.getString("cdnfuMimic", "")?.ifBlank { "mixed" } ?: "mixed",
-            cdnfuUplinkMethod = p.getString("cdnfuUplinkMethod", "")?.ifBlank { "POST" } ?: "POST",
-            cdnfuUplinkPath = p.getString("cdnfuUplinkPath", "")?.ifBlank { "api" } ?: "api",
-            cdnfuUplinkData = p.getString("cdnfuUplinkData", "")?.ifBlank { "body" } ?: "body",
-            cdnfuXhttpPlacement = p.getString("cdnfuXhttpPlacement", "")?.ifBlank { "cookie" } ?: "cookie",
-            cdnfuDownlinkMode = p.getString("cdnfuDownlinkMode", "")?.ifBlank { "stream" } ?: "stream",
-            cdnfuMultipath = p.getInt("cdnfuMultipath", 4).coerceIn(0, 32),
             // The whole-config TOML has to survive here too. These prefs are the config the
             // service actually runs; a profile's text lives in the profile JSON, and if it
             // is not carried across, selecting that profile silently falls back to the
             // derived config and the operator's edits do nothing.
             s3fuToml = p.getString("s3fuToml", "") ?: "",
-            cdnfuToml = p.getString("cdnfuToml", "") ?: "",
             xrayManual = p.getBoolean("xrayManual", false),
+            turnfuHost = p.getString("turnfuHost", "") ?: "",
+            turnfuPort = p.getInt("turnfuPort", 46000).coerceIn(1, 65535),
+            turnfuPassword = p.getString("turnfuPassword", "") ?: "",
+            turnfuWorkers = p.getInt("turnfuWorkers", 20).coerceIn(5, 100),
+            turnfuMtu = p.getInt("turnfuMtu", 1200).coerceIn(576, 1500),
+            turnfuCalls = p.getString("turnfuCalls", "").orEmpty().split(',').filter(String::isNotBlank),
+            turnfuToken = p.getString("turnfuToken", "").orEmpty(),
         )
     }
 
@@ -120,6 +117,8 @@ object ConfigStore {
         )
     }
 
+    private const val RETIRED_PROTOCOL = "CDNFU"
+
     fun loadProfiles(context: Context): List<ConfigProfile> {
         val p = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
         val raw = p.getString(KEY_PROFILES, null).orEmpty()
@@ -127,7 +126,9 @@ object ConfigStore {
             val arr = JSONArray(raw)
             buildList {
                 for (i in 0 until arr.length()) {
-                    add(profileFromJson(arr.getJSONObject(i)))
+                    val item = arr.getJSONObject(i)
+                    if (item.optJSONObject("config")?.optString("protocol") == RETIRED_PROTOCOL) continue
+                    add(profileFromJson(item))
                 }
             }
         }.getOrDefault(emptyList())
@@ -315,6 +316,21 @@ object ConfigStore {
         app.smugly.util.AppLog.setFileLoggingEnabled(context, settings.fileLogging)
     }
 
+    fun turnfuCallLink(context: Context): String =
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString(TURNFU_CALL_KEY, "") ?: ""
+
+    fun saveTurnfuCallLink(context: Context, link: String) {
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
+            .putString(TURNFU_CALL_KEY, link.trim())
+            .apply()
+    }
+
+    private fun rememberTurnfuCall(context: Context, raw: String) {
+        if (!TurnfuLink.looksLike(raw) || turnfuCallLink(context).isNotBlank()) return
+        val hash = TurnfuLink.parse(raw)?.callHashes?.firstOrNull() ?: return
+        TurnfuLink.callUrl(hash)?.let { saveTurnfuCallLink(context, it) }
+    }
+
     fun effectiveConfig(context: Context, profileConfig: Config = load(context)): Config {
         val global = loadGlobalSettings(context)
         return profileConfig.copy(
@@ -327,16 +343,19 @@ object ConfigStore {
      * Build a shareable deep link for [profile].
      * - Slipstream (DNS) profiles → `slipstream://import?...`
      * - S3FU profiles → `s3fu://import?...`
-     * - CDNFU profiles → `cdnfu://import?...`
      *
      * The full config is carried as a URL-safe base64 JSON blob so every field round-trips
      * (client knobs, s3 credentials, etc.). A human-readable `name` query param is included.
      */
     fun exportProfileLink(profile: ConfigProfile): String {
+        if (profile.config.protocol == Config.TunnelProtocol.TURNFU) {
+            val c = profile.config
+            return TurnfuLink.importLink(TurnfuLinkData(c.turnfuHost, c.turnfuPort, c.turnfuPassword, c.turnfuWorkers, c.turnfuMtu, profile.name, c.turnfuCalls, c.turnfuToken))
+        }
         val scheme = when (profile.config.protocol) {
             Config.TunnelProtocol.S3FU -> "s3fu"
-            Config.TunnelProtocol.CDNFU -> "cdnfu"
             Config.TunnelProtocol.XRAY -> "xray"
+            Config.TunnelProtocol.TURNFU -> "turnfu"
             else -> "slipstream"
         }
         val name = profile.name.trim().ifBlank { defaultProfileName(profile.config) }
@@ -355,6 +374,7 @@ object ConfigStore {
 
     fun importProfile(context: Context, uri: Uri): ConfigProfile? {
         val imported = parseProfileLink(uri, effectiveConfig(context)) ?: return null
+        rememberTurnfuCall(context, uri.toString())
         return addProfile(context, imported.name, imported.config)
     }
 
@@ -420,7 +440,7 @@ object ConfigStore {
     /**
      * Import a profile from free-form text (clipboard paste or file contents). Accepts:
      * - one or more vless:// links (each becomes an Xray profile)
-     * - a slipstream://, s3fu://, cdnfu:// or xray:// link (or one embedded in surrounding text)
+     * - a slipstream://, s3fu://, turnfu:// or xray:// link (or one embedded in surrounding text)
      * - a JSON profile blob ({"name", "config": {...}}) or bare config JSON ({"domain": ...})
      * - a raw Xray config JSON ({"inbounds": ..., "outbounds": ...})
      * - a base64 / query-string payload understood by the link parser
@@ -438,12 +458,12 @@ object ConfigStore {
             importVlessProfiles(context, trimmed).lastOrNull()?.let { return it }
         }
 
-        // 1) Explicit or embedded slipstream:// / s3fu:// / cdnfu:// / xray:// URI.
+        // 1) Explicit or embedded slipstream:// / s3fu:// / turnfu:// / xray:// URI.
         val uriText = PROFILE_URI_IN_TEXT.find(trimmed)?.value
             ?: trimmed.takeIf {
                 it.startsWith("slipstream:", ignoreCase = true) ||
                     it.startsWith("s3fu:", ignoreCase = true) ||
-                    it.startsWith("cdnfu:", ignoreCase = true) ||
+                    it.startsWith("turnfu2:", ignoreCase = true) ||
                     it.startsWith("xray:", ignoreCase = true)
             }?.lineSequence()?.firstOrNull()
         if (uriText != null) {
@@ -460,7 +480,7 @@ object ConfigStore {
                         return addProfile(context, parsed.name, parsed.config)
                     }
                     json.has("domain") || json.has("resolverHost") ||
-                        json.has("s3Endpoint") || json.has("cdnfuUrl") ||
+                        json.has("s3Endpoint") ||
                         json.has("protocol") -> {
                         val config = configFromJson(json)
                         return addProfile(context, defaultProfileName(config), config)
@@ -491,7 +511,7 @@ object ConfigStore {
     }
 
     private val PROFILE_URI_IN_TEXT =
-        Regex("(?:slipstream|s3fu|cdnfu|xray):[^\\s\"'<>]+", RegexOption.IGNORE_CASE)
+        Regex("(?:slipstream|s3fu|turnfu2|xray):[^\\s\"'<>]+", RegexOption.IGNORE_CASE)
 
     /**
      * Schemes other clients use for protocols this app does not speak. `vless://` is absent on
@@ -499,12 +519,12 @@ object ConfigStore {
      * which deserves the same refusal.
      */
     private val UNSUPPORTED_LINK_SCHEME = Regex(
-        "^\\s*(trojan|vmess|vless|ss|ssr|hysteria2?|hy2|tuic|wireguard|snell|juicity|anytls|socks5?)://",
+        "^\\s*(turnfu|trojan|vmess|vless|ss|ssr|hysteria2?|hy2|tuic|wireguard|snell|juicity|anytls|socks5?)://",
         RegexOption.IGNORE_CASE
     )
 
     /**
-     * Parse a slipstream://, s3fu://, cdnfu:// or xray:// deep link into a name + config.
+     * Parse a slipstream://, s3fu://, turnfu:// or xray:// deep link into a name + config.
      * Prefers a full base64 JSON config payload (export format); falls back to legacy
      * query-param forms used by the bot / hand-written links.
      *
@@ -513,8 +533,13 @@ object ConfigStore {
      */
     private fun parseProfileLink(uri: Uri, base: Config): ImportedProfile? {
         val scheme = uri.scheme?.lowercase() ?: return null
-        if (scheme != "slipstream" && scheme != "s3fu" && scheme != "cdnfu" && scheme != "xray") {
+        if (scheme != "slipstream" && scheme != "s3fu" && scheme != "turnfu2" && scheme != "xray") {
             return null
+        }
+        if (scheme == "turnfu2") {
+            val data = TurnfuLink.parse(uri.toString()) ?: return null
+            val config = TurnfuLink.applyTo(base, data)
+            return ImportedProfile(data.name ?: defaultProfileName(config), config)
         }
 
         val params = linkedMapOf<String, String>()
@@ -534,14 +559,13 @@ object ConfigStore {
                     json.has("domain") || json.has("resolverHost") ||
                         json.has("s3Endpoint") || json.has("protocol") ||
                         json.has("s3Bucket") || json.has("s3Psk") ||
-                        json.has("cdnfuUrl") || json.has("cdnfuPsk") ||
                         json.has("xrayConfigJson") -> configFromJson(json)
                     else -> null
                 }
                 if (config != null) {
                     val forced = when (scheme) {
                         "s3fu" -> config.copy(protocol = Config.TunnelProtocol.S3FU)
-                        "cdnfu" -> config.copy(protocol = Config.TunnelProtocol.CDNFU)
+                        "turnfu2" -> config.copy(protocol = Config.TunnelProtocol.TURNFU)
                         "xray" -> config.copy(protocol = Config.TunnelProtocol.XRAY)
                         else -> config
                     }
@@ -559,11 +583,6 @@ object ConfigStore {
         // s3fu query-param form (hand-written / bot links without full JSON blob).
         if (scheme == "s3fu") {
             return parseS3fuQueryParams(params, base)
-        }
-
-        // cdnfu query-param form: url + psk (+ optional knobs).
-        if (scheme == "cdnfu") {
-            return parseCdnfuQueryParams(params, base)
         }
 
         // xray:// only ever carries the exported JSON blob handled above; there is
@@ -615,44 +634,6 @@ object ConfigStore {
         val name = first("name", "profilename")
             ?: legacyLogin?.takeIf { it.isNotBlank() }
             ?: config.s3Bucket.takeIf { it.isNotBlank() }
-            ?: defaultProfileName(config)
-        return ImportedProfile(name, config)
-    }
-
-    private fun parseCdnfuQueryParams(params: Map<String, String>, base: Config): ImportedProfile? {
-        fun first(vararg keys: String): String? =
-            keys.firstNotNullOfOrNull { params[it.lowercase()]?.takeIf { v -> v.isNotBlank() } }
-
-        val url = first("url", "cdnfuurl", "cdn_url", "endpoint", "host")
-        val psk = first("psk", "cdnfupsk", "cdn_psk", "password", "pass")
-        if (url.isNullOrBlank() && psk.isNullOrBlank()) return null
-        val config = base.copy(
-            protocol = Config.TunnelProtocol.CDNFU,
-            cdnfuUrl = url ?: base.cdnfuUrl,
-            // NOT "host" — that is already a legacy alias for the URL just above, and
-            // renaming it would silently break links already in the wild.
-            cdnfuHost = first("hostheader", "host_header", "cdnfuhost", "sni") ?: base.cdnfuHost,
-            cdnfuPsk = psk ?: base.cdnfuPsk,
-            cdnfuMimic = first("mimic", "path_mimic") ?: base.cdnfuMimic.ifBlank { "mixed" },
-            cdnfuUplinkMethod = first("method", "uplink_method") ?: base.cdnfuUplinkMethod.ifBlank { "POST" },
-            cdnfuUplinkPath = first("uplink_path", "path") ?: base.cdnfuUplinkPath.ifBlank { "api" },
-            cdnfuUplinkData = first("uplink_data", "data") ?: base.cdnfuUplinkData.ifBlank { "body" },
-            cdnfuXhttpPlacement = first("xhttp", "placement", "xhttp_placement")
-                ?: base.cdnfuXhttpPlacement.ifBlank { "cookie" },
-            cdnfuDownlinkMode = first("downlink", "dl", "downlink_mode")
-                ?: base.cdnfuDownlinkMode.ifBlank { "stream" },
-            cdnfuMultipath = first("multipath", "mp", "paths")?.toIntOrNull()?.coerceIn(0, 32)
-                ?: base.cdnfuMultipath,
-            // A panel with a client config template sends the whole config alongside the
-            // parameters. When present it is what the engine runs; the parameters above are
-            // still parsed so an older app build (and the profile name) keep working.
-            cdnfuToml = decodeConfigParam(params["toml"])
-        )
-        val name = first("name", "profilename")
-            ?: runCatching {
-                java.net.URI(if (config.cdnfuUrl.contains("://")) config.cdnfuUrl else "https://${config.cdnfuUrl}")
-                    .host
-            }.getOrNull()?.takeIf { !it.isNullOrBlank() }
             ?: defaultProfileName(config)
         return ImportedProfile(name, config)
     }
@@ -765,19 +746,15 @@ object ConfigStore {
             .putString("s3Prefix", config.s3Prefix)
             .putString("s3Psk", config.s3Psk)
             .putString("xrayConfigJson", config.xrayConfigJson)
-            .putString("cdnfuUrl", config.cdnfuUrl)
-            .putString("cdnfuHost", config.cdnfuHost)
-            .putString("cdnfuPsk", config.cdnfuPsk)
-            .putString("cdnfuMimic", config.cdnfuMimic)
-            .putString("cdnfuUplinkMethod", config.cdnfuUplinkMethod)
-            .putString("cdnfuUplinkPath", config.cdnfuUplinkPath)
-            .putString("cdnfuUplinkData", config.cdnfuUplinkData)
-            .putString("cdnfuXhttpPlacement", config.cdnfuXhttpPlacement)
-            .putString("cdnfuDownlinkMode", config.cdnfuDownlinkMode)
-            .putInt("cdnfuMultipath", config.cdnfuMultipath)
             .putString("s3fuToml", config.s3fuToml)
-            .putString("cdnfuToml", config.cdnfuToml)
             .putBoolean("xrayManual", config.xrayManual)
+            .putString("turnfuHost", config.turnfuHost.trim())
+            .putInt("turnfuPort", config.turnfuPort)
+            .putString("turnfuPassword", config.turnfuPassword.trim())
+            .putInt("turnfuWorkers", config.turnfuWorkers)
+            .putInt("turnfuMtu", config.turnfuMtu)
+            .putString("turnfuCalls", config.turnfuCalls.joinToString(","))
+            .putString("turnfuToken", config.turnfuToken)
             .apply()
     }
 
@@ -836,22 +813,18 @@ object ConfigStore {
             .put("s3Prefix", config.s3Prefix)
             .put("s3Psk", config.s3Psk)
             .put("xrayConfigJson", config.xrayConfigJson)
-            .put("cdnfuUrl", config.cdnfuUrl)
-            .put("cdnfuHost", config.cdnfuHost)
-            .put("cdnfuPsk", config.cdnfuPsk)
-            .put("cdnfuMimic", config.cdnfuMimic)
-            .put("cdnfuUplinkMethod", config.cdnfuUplinkMethod)
-            .put("cdnfuUplinkPath", config.cdnfuUplinkPath)
-            .put("cdnfuUplinkData", config.cdnfuUplinkData)
-            .put("cdnfuXhttpPlacement", config.cdnfuXhttpPlacement)
-            .put("cdnfuDownlinkMode", config.cdnfuDownlinkMode)
-            .put("cdnfuMultipath", config.cdnfuMultipath)
             // The whole-config TOML: a profile's own text, or the one the panel put in the
             // link. Missing here meant every profile was stored without it, so an import
             // parsed the config correctly and then threw it away on write.
             .put("s3fuToml", config.s3fuToml)
-            .put("cdnfuToml", config.cdnfuToml)
             .put("xrayManual", config.xrayManual)
+            .put("turnfuHost", config.turnfuHost)
+            .put("turnfuPort", config.turnfuPort)
+            .put("turnfuPassword", config.turnfuPassword)
+            .put("turnfuWorkers", config.turnfuWorkers)
+            .put("turnfuMtu", config.turnfuMtu)
+            .put("turnfuCalls", JSONArray(config.turnfuCalls))
+            .put("turnfuToken", config.turnfuToken)
 
     private fun configFromJson(json: JSONObject): Config =
         Config(
@@ -881,19 +854,15 @@ object ConfigStore {
             s3Prefix = json.optString("s3Prefix", "").ifBlank { "s3fu" },
             s3Psk = json.optString("s3Psk", ""),
             xrayConfigJson = json.optString("xrayConfigJson", ""),
-            cdnfuUrl = json.optString("cdnfuUrl", ""),
-            cdnfuHost = json.optString("cdnfuHost", ""),
-            cdnfuPsk = json.optString("cdnfuPsk", ""),
-            cdnfuMimic = json.optString("cdnfuMimic", "").ifBlank { "mixed" },
-            cdnfuUplinkMethod = json.optString("cdnfuUplinkMethod", "").ifBlank { "POST" },
-            cdnfuUplinkPath = json.optString("cdnfuUplinkPath", "").ifBlank { "api" },
-            cdnfuUplinkData = json.optString("cdnfuUplinkData", "").ifBlank { "body" },
-            cdnfuXhttpPlacement = json.optString("cdnfuXhttpPlacement", "").ifBlank { "cookie" },
-            cdnfuDownlinkMode = json.optString("cdnfuDownlinkMode", "").ifBlank { "stream" },
-            cdnfuMultipath = json.optInt("cdnfuMultipath", 4).coerceIn(0, 32),
             s3fuToml = json.optString("s3fuToml", ""),
-            cdnfuToml = json.optString("cdnfuToml", ""),
             xrayManual = json.optBoolean("xrayManual", false),
+            turnfuHost = json.optString("turnfuHost", ""),
+            turnfuPort = json.optInt("turnfuPort", 46000).coerceIn(1, 65535),
+            turnfuPassword = json.optString("turnfuPassword", ""),
+            turnfuWorkers = json.optInt("turnfuWorkers", 20).coerceIn(5, 100),
+            turnfuMtu = json.optInt("turnfuMtu", 1200).coerceIn(576, 1500),
+            turnfuCalls = json.optJSONArray("turnfuCalls")?.let { a -> List(a.length()) { a.optString(it) }.filter(String::isNotBlank) }.orEmpty(),
+            turnfuToken = json.optString("turnfuToken", ""),
         )
 
     private inline fun <reified T : Enum<T>> enumValue(value: String?, fallback: T): T =
@@ -904,15 +873,10 @@ object ConfigStore {
     private fun defaultProfileName(config: Config): String = when (config.protocol) {
         Config.TunnelProtocol.S3FU ->
             config.s3Bucket.ifBlank { t(S.PROFILE_NAME_DEFAULT_S3FU) }
-        Config.TunnelProtocol.CDNFU ->
-            runCatching {
-                java.net.URI(
-                    if (config.cdnfuUrl.contains("://")) config.cdnfuUrl else "https://${config.cdnfuUrl}"
-                ).host
-            }.getOrNull()?.takeIf { !it.isNullOrBlank() }
-                ?: config.cdnfuUrl.ifBlank { t(S.PROFILE_NAME_DEFAULT_CDNFU) }
         Config.TunnelProtocol.XRAY ->
             XrayConfigBuilder.describeServer(config.xrayConfigJson) ?: t(S.PROFILE_NAME_DEFAULT_XRAY)
+        Config.TunnelProtocol.TURNFU ->
+            config.turnfuHost.ifBlank { t(S.PROFILE_NAME_DEFAULT_TURNFU) }
         else ->
             config.domain.ifBlank { t(S.PROFILE_NAME_DEFAULT) }
     }

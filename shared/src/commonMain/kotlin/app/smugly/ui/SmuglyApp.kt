@@ -39,14 +39,17 @@ import app.smugly.AppRelease
 import app.smugly.Config
 import app.smugly.ConfigProfile
 import app.smugly.GlobalSettings
+import app.smugly.RootMode
 import app.smugly.S
 import app.smugly.Strings
+import app.smugly.TurnfuCall
 import app.smugly.UpdateStatus
 import app.smugly.account.AccountLink
 import app.smugly.account.AccountLinkPoll
 import app.smugly.account.AccountSyncResult
 import app.smugly.account.SignOutReason
 import app.smugly.currentHostPlatform
+import app.smugly.isDesktop
 import app.smugly.defaultConfig
 import app.smugly.needsReconnectToApply
 import app.smugly.resetToDefaults
@@ -63,6 +66,7 @@ import app.smugly.ui.components.ConfirmDialog
 import app.smugly.ui.components.CrashReportDialog
 import app.smugly.ui.components.DrawerPanel
 import app.smugly.ui.components.LoadingOverlay
+import app.smugly.ui.components.TurnfuCallDialog
 import app.smugly.ui.components.UpdateDialog
 import app.smugly.ui.screens.DiagnosticsScreen
 import app.smugly.ui.screens.HomeScreen
@@ -105,6 +109,9 @@ fun SmuglyApp(platform: SmuglyPlatform, shortcuts: AppShortcuts? = null) {
         /** Pending profile delete payload (kept during exit anim). */
         var pendingDelete by remember { mutableStateOf<ConfigProfile?>(null) }
         var deleteDialogVisible by remember { mutableStateOf(false) }
+        var turnfuCallVisible by remember { mutableStateOf(false) }
+        var turnfuCallText by remember { mutableStateOf("") }
+        var turnfuCallLink by remember { mutableStateOf(ui.loadTurnfuCallLink()) }
         /** Crash report body (kept during exit anim). */
         var crashDialogBody by remember { mutableStateOf("") }
         var crashDialogVisible by remember { mutableStateOf(false) }
@@ -170,6 +177,9 @@ fun SmuglyApp(platform: SmuglyPlatform, shortcuts: AppShortcuts? = null) {
         var accountBusy by remember { mutableStateOf(false) }
         var signingOut by remember { mutableStateOf(false) }
         var accountWatchUntilMs by remember { mutableStateOf(0L) }
+        /** Plan end before a checkout returned to the app; a later end means the payment landed. */
+        var paidPlanBaselineMs by remember { mutableStateOf<Long?>(null) }
+        var paidWatchUntilMs by remember { mutableStateOf(0L) }
         var accountWakeTick by remember { mutableStateOf(0) }
         val accountWakeSignal = remember { Channel<Unit>(Channel.CONFLATED) }
         var signOutDialogVisible by remember { mutableStateOf(false) }
@@ -332,11 +342,18 @@ fun SmuglyApp(platform: SmuglyPlatform, shortcuts: AppShortcuts? = null) {
                     accountSnapshot = result.snapshot
                     if (result.folderChanged) reloadProfiles()
                     val nowReady = result.snapshot.plan != null && managedReady()
+                    val paidBaseline = paidPlanBaselineMs
+                        ?.takeIf { app.smugly.platform.PlatformTime.currentTimeMillis() < paidWatchUntilMs }
                     if (nowReady && !wasReady) {
                         focusFolderId = account?.managedSubscriptionId()
                         accountWatchUntilMs = 0
+                        paidPlanBaselineMs = null
                         ui.closeWebCabinet()
                         ui.toast(t(S.TOAST_SUBSCRIPTION_READY))
+                    } else if (nowReady && paidBaseline != null && (result.snapshot.plan?.endsAtMs ?: 0L) > paidBaseline) {
+                        focusFolderId = account?.managedSubscriptionId()
+                        paidPlanBaselineMs = null
+                        ui.toast(t(S.TOAST_SUBSCRIPTION_RENEWED))
                     } else if (result.accessReissued) {
                         ui.toast(t(S.TOAST_ACCESS_REISSUED))
                     }
@@ -419,6 +436,20 @@ fun SmuglyApp(platform: SmuglyPlatform, shortcuts: AppShortcuts? = null) {
 
         DisposableEffect(ui) {
             val stop = ui.observeAccountWake {
+                accountWakeTick++
+                accountWakeSignal.trySend(Unit)
+            }
+            onDispose { stop() }
+        }
+
+        DisposableEffect(ui) {
+            val stop = ui.observePaymentReturn {
+                val now = app.smugly.platform.PlatformTime.currentTimeMillis()
+                screen = AppScreen.HOME
+                account?.managedSubscriptionId()?.let { focusFolderId = it }
+                paidPlanBaselineMs = accountSnapshot?.plan?.endsAtMs ?: 0L
+                paidWatchUntilMs = now + PAYMENT_WATCH_MS
+                accountWatchUntilMs = maxOf(accountWatchUntilMs, now + PAYMENT_WATCH_MS)
                 accountWakeTick++
                 accountWakeSignal.trySend(Unit)
             }
@@ -796,7 +827,19 @@ fun SmuglyApp(platform: SmuglyPlatform, shortcuts: AppShortcuts? = null) {
                                 ui.reorderProfiles(orderedIds)
                                 reloadProfiles()
                             },
-                            onToggle = { ui.toggleConnect() },
+                            onToggle = {
+                                val active = profiles.firstOrNull { it.id == activeId }
+                                if (!connect.running && !connect.connecting &&
+                                    active?.config?.protocol == Config.TunnelProtocol.TURNFU &&
+                                    TurnfuCall.url(ui.loadTurnfuCallLink()) == null
+                                ) {
+                                    val clip = runCatching { ui.readClipboard() }.getOrDefault("")
+                                    turnfuCallText = TurnfuCall.findIn(clip) ?: ui.loadTurnfuCallLink()
+                                    turnfuCallVisible = true
+                                } else {
+                                    ui.toggleConnect()
+                                }
+                            },
                             subscriptions = subscriptions,
                             refreshingSubscriptionId = refreshingSubscriptionId,
                             onRefreshSubscription = { id ->
@@ -958,6 +1001,12 @@ fun SmuglyApp(platform: SmuglyPlatform, shortcuts: AppShortcuts? = null) {
                             onMenu = { openDrawer() },
                             showTunSettings = ui.supportsTunTuning(),
                             showAutoConnect = ui.supportsAutoConnectOnBoot(),
+                            showRootSettings = ui.supportsRootMode(),
+                            turnfuCallLink = if (ui.supportsSystemVpn() && !currentHostPlatform().isDesktop()) turnfuCallLink else null,
+                            onTurnfuCallLink = {
+                                turnfuCallLink = it
+                                ui.saveTurnfuCallLink(it)
+                            },
                             onBlockDrawerGestures = { blockDrawerGestures = it },
                             onReset = {
                                 val fixed = settings.resetToDefaults(ui.defaultConnectionMode())
@@ -981,10 +1030,26 @@ fun SmuglyApp(platform: SmuglyPlatform, shortcuts: AppShortcuts? = null) {
                                     trafficNotification = false
                                 )
                                 val needsReconnect = settings.needsReconnectToApply(fixed)
+                                val enablingMode = fixed.rootMode.isActive && !settings.rootMode.isActive
+                                val enablingHotspot = fixed.rootHotspot && !settings.rootHotspot
                                 settings = fixed
                                 ui.saveGlobalSettings(fixed)
                                 Strings.set(fixed.language)
                                 uiTick++
+                                if (enablingMode || enablingHotspot) {
+                                    ui.requestRootAccess { granted ->
+                                        if (!granted) {
+                                            val reverted = settings.copy(
+                                                rootMode = if (enablingMode) RootMode.OFF else settings.rootMode,
+                                                rootHotspot = if (enablingHotspot) false else settings.rootHotspot
+                                            )
+                                            settings = reverted
+                                            ui.saveGlobalSettings(reverted)
+                                            uiTick++
+                                            ui.toast(t(S.TOAST_ROOT_DENIED))
+                                        }
+                                    }
+                                }
                                 if (needsReconnect && (connect.running || connect.connecting) && !settingsReconnectHinted) {
                                     settingsReconnectHinted = true
                                     ui.toast(t(S.TOAST_SETTINGS_RECONNECT))
@@ -1202,6 +1267,24 @@ fun SmuglyApp(platform: SmuglyPlatform, shortcuts: AppShortcuts? = null) {
                     }
             )
 
+            TurnfuCallDialog(
+                visible = turnfuCallVisible,
+                link = turnfuCallText,
+                onLink = { turnfuCallText = it },
+                onConnect = {
+                    val url = TurnfuCall.url(turnfuCallText)
+                    if (url == null) {
+                        ui.toast(t(S.TURNFU_CALL_INVALID))
+                    } else {
+                        ui.saveTurnfuCallLink(url)
+                        turnfuCallLink = url
+                        turnfuCallVisible = false
+                        ui.toggleConnect()
+                    }
+                },
+                onDismiss = { turnfuCallVisible = false }
+            )
+
             // Confirm delete — always composed so exit anim can finish (like popup menu).
             val toDelete = pendingDelete
             ConfirmDialog(
@@ -1312,5 +1395,6 @@ fun SmuglyApp(platform: SmuglyPlatform, shortcuts: AppShortcuts? = null) {
 private const val LINE_BREAK = "\n"
 
 private const val ACCOUNT_WATCH_MS = 20 * 60_000L
+private const val PAYMENT_WATCH_MS = 3 * 60_000L
 private const val SIGN_OUT_MIN_SPINNER_MS = 700L
 private const val DRAWER_PICK_CLOSE_DELAY_MS = 15

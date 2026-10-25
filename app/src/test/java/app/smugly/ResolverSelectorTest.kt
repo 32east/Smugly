@@ -193,7 +193,7 @@ class ResolverSelectorTest {
     // -- GlobalSettings.dnsResolverPool: default + the positional-arg regression in ConfigStore.save --
 
     @Test
-    fun fresh_install_defaults_the_resolver_pool_to_local_plus_the_four_public_resolvers() {
+    fun fresh_install_defaults_the_resolver_pool_to_local_only() {
         assertEquals(
             DnsResolverPool.DEFAULT_RAW,
             ConfigStore.loadGlobalSettings(context).dnsResolverPool
@@ -322,6 +322,10 @@ class ResolverSelectorTest {
     fun latency_probe_without_a_measurement_offers_both_transports_for_every_host() {
         ResolverSelector.clearNetworkTransportPreferenceForTests(context)
         val config = testConfig(domain = "fresh.example.com")
+        ConfigStore.saveGlobalSettings(
+            context,
+            ConfigStore.loadGlobalSettings(context).copy(dnsResolverPool = "${DnsResolverPool.LOCAL_SENTINEL}\n9.9.9.9")
+        )
 
         val candidates = ResolverSelector.probeResolverCandidates(context, config)
 

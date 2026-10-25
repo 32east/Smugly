@@ -251,25 +251,44 @@ object XrayConfigBuilder {
      */
     fun listenAddress(allowLan: Boolean): String = if (allowLan) "0.0.0.0" else "127.0.0.1"
 
-    fun withSocksPort(configJson: String, socksPort: Int, listen: String = "127.0.0.1"): String {
+    fun withSocksPort(
+        configJson: String,
+        socksPort: Int,
+        listen: String = "127.0.0.1",
+        username: String? = null,
+        password: String? = null
+    ): String {
         val root = runCatching { JSONObject(configJson) }.getOrNull() ?: return configJson
         val inbounds = root.optJSONArray("inbounds") ?: JSONArray().also { root.put("inbounds", it) }
         for (i in 0 until inbounds.length()) {
             val inbound = inbounds.optJSONObject(i) ?: continue
             if (!inbound.optString("protocol").equals("socks", ignoreCase = true)) continue
             inbound.put("listen", listen).put("port", socksPort)
-            // Force no-auth too. Panel configs routinely ship this inbound with
-            // `auth: "password"` + accounts for desktop clients, and the TUN bridge that dials it
-            // is ours and offers no credentials — Xray then rejects every single connection with
-            // "proxy/socks: no matching auth method", so the tunnel comes up and carries nothing.
+            // The panel's own accounts are always replaced: they are meant for desktop clients,
+            // and the TUN bridge that dials this inbound only knows the app's local credentials.
             val settings = inbound.optJSONObject("settings")
                 ?: JSONObject().also { inbound.put("settings", it) }
-            settings.put("auth", "noauth")
-            settings.remove("accounts")
+            applySocksAuth(settings, username, password)
             return root.toString(2)
         }
-        inbounds.put(socksInbound(socksPort).put("listen", listen))
+        val inbound = socksInbound(socksPort).put("listen", listen)
+        applySocksAuth(
+            inbound.optJSONObject("settings") ?: JSONObject().also { inbound.put("settings", it) },
+            username,
+            password
+        )
+        inbounds.put(inbound)
         return root.toString(2)
+    }
+
+    private fun applySocksAuth(settings: JSONObject, username: String?, password: String?) {
+        if (username.isNullOrEmpty() || password.isNullOrEmpty()) {
+            settings.put("auth", "noauth")
+            settings.remove("accounts")
+            return
+        }
+        settings.put("auth", "password")
+        settings.put("accounts", JSONArray().put(JSONObject().put("user", username).put("pass", password)))
     }
 
     /**

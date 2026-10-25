@@ -51,12 +51,14 @@ object S3fuBridge {
     fun startClient(
         configToml: String,
         socksListen: String,
-        caFile: String
+        caFile: String,
+        username: String? = null,
+        password: String? = null
     ): Result<Unit> {
         if (!loaded) return Result.failure(IllegalStateException("libs3fu is not loaded"))
-        AppLog.i(TAG, "start socks=$socksListen configBytes=${configToml.length}")
+        AppLog.i(TAG, "start socks=$socksListen configBytes=${configToml.length} auth=${!username.isNullOrEmpty()}")
         val code = runCatching {
-            nativeStartClientToml(configToml, socksListen, caFile)
+            nativeStartClientToml(configToml, socksListen, caFile, username.orEmpty(), password.orEmpty())
         }.getOrElse {
             AppLog.e(TAG, "nativeStartClientToml threw", it)
             return Result.failure(it)
@@ -105,7 +107,9 @@ object S3fuBridge {
     private external fun nativeStartClientToml(
         configToml: String,
         socksListen: String,
-        caFile: String
+        caFile: String,
+        socksUsername: String,
+        socksPassword: String
     ): Int
 
     private external fun nativeStartProbeToml(configToml: String, socksListen: String, caFile: String): Int

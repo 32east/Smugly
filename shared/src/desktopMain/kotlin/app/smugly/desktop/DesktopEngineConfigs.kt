@@ -3,7 +3,6 @@ package app.smugly.desktop
 import app.smugly.Config
 import app.smugly.DnsResolverPool
 import app.smugly.TunnelToml
-import app.smugly.effectiveCdnfuToml
 import app.smugly.effectiveS3fuToml
 import org.json.JSONArray
 import org.json.JSONObject
@@ -33,13 +32,6 @@ object DesktopEngineConfigs {
         val toml = c.effectiveS3fuToml()
         require(toml.isNotBlank()) { "s3fu config is empty" }
         return TunnelToml.withForcedTopLevelKey(toml, "socks_listen", "127.0.0.1:$socksPort")
-    }
-
-    /** cdnfu client TOML — see `configs/client.toml` in the cdn-fuckup repo. */
-    fun cdnfu(c: Config, socksPort: Int): String {
-        val toml = c.effectiveCdnfuToml()
-        require(toml.isNotBlank()) { "cdnfu config is empty" }
-        return TunnelToml.withForcedTopLevelKey(toml, "listen", "127.0.0.1:$socksPort")
     }
 
     /**

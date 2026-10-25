@@ -98,6 +98,8 @@ interface SmuglyPlatform {
     fun loadGlobalSettings(): GlobalSettings
     fun saveGlobalSettings(settings: GlobalSettings)
     fun toggleConnect()
+    fun loadTurnfuCallLink(): String = ""
+    fun saveTurnfuCallLink(link: String) {}
     fun observeConnect(onChange: (ConnectUiState) -> Unit): () -> Unit
     fun readClipboard(): String
     fun writeClipboard(text: String)
@@ -168,6 +170,10 @@ interface SmuglyPlatform {
     fun supportsTunTuning(): Boolean = false
 
     fun supportsAutoConnectOnBoot(): Boolean = false
+
+    fun supportsRootMode(): Boolean = false
+
+    fun requestRootAccess(onResult: (Boolean) -> Unit) = onResult(false)
 
     fun defaultConnectionMode(): Config.Mode = Config.Mode.PROXY
 
@@ -272,6 +278,9 @@ interface SmuglyPlatform {
     fun openExternalUrl(url: String) {}
 
     fun observeAccountWake(onWake: () -> Unit): () -> Unit = { }
+
+    /** The web cabinet handed control back after a checkout (`smugly://paid`). */
+    fun observePaymentReturn(onPaid: () -> Unit): () -> Unit = { }
 }
 
 fun emptyDraft(base: Config = defaultConfig(mode = Config.Mode.PROXY)): EditorDraft =
@@ -290,7 +299,7 @@ fun emptyDraft(base: Config = defaultConfig(mode = Config.Mode.PROXY)): EditorDr
  */
 fun profileSubtitle(profile: ConfigProfile): String = when (profile.config.protocol) {
     Config.TunnelProtocol.S3FU -> t(S.PROTOCOL_S3FU)
-    Config.TunnelProtocol.CDNFU -> t(S.PROTOCOL_CDNFU)
+    Config.TunnelProtocol.TURNFU -> t(S.PROTOCOL_TURNFU)
     Config.TunnelProtocol.XRAY -> t(S.PROTOCOL_XRAY_CORE)
     Config.TunnelProtocol.SLIPSTREAM -> t(S.PROTOCOL_SLIPSTREAM)
 }

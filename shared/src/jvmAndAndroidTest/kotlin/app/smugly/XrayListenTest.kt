@@ -3,6 +3,7 @@ package app.smugly
 import org.json.JSONObject
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 
 class XrayListenTest {
     private val withInbounds = """
@@ -37,6 +38,36 @@ class XrayListenTest {
         assertEquals("0.0.0.0", inbound(out, "socks").getString("listen"))
         assertEquals("0.0.0.0", inbound(out, "http").getString("listen"))
         assertEquals(1081, inbound(out, "http").getInt("port"))
+    }
+
+    @Test
+    fun localCredentialsReplaceThePanelAccounts() {
+        val settings = inbound(XrayConfigBuilder.withSocksPort(withInbounds, 1080, "127.0.0.1", "smugly", "s3cret"), "socks")
+            .getJSONObject("settings")
+        assertEquals("password", settings.getString("auth"))
+        val accounts = settings.getJSONArray("accounts")
+        assertEquals(1, accounts.length())
+        assertEquals("smugly", accounts.getJSONObject(0).getString("user"))
+        assertEquals("s3cret", accounts.getJSONObject(0).getString("pass"))
+    }
+
+    @Test
+    fun withoutCredentialsTheInboundIsOpen() {
+        val settings = inbound(XrayConfigBuilder.withSocksPort(withInbounds, 1080), "socks").getJSONObject("settings")
+        assertEquals("noauth", settings.getString("auth"))
+        assertFalse(settings.has("accounts"))
+        val half = inbound(XrayConfigBuilder.withSocksPort(withInbounds, 1080, "127.0.0.1", "smugly", ""), "socks")
+        assertEquals("noauth", half.getJSONObject("settings").getString("auth"))
+    }
+
+    @Test
+    fun injectedInboundCarriesTheCredentials() {
+        val bare = """{"outbounds": [{"tag": "proxy", "protocol": "vless"}]}"""
+        val settings = inbound(XrayConfigBuilder.withSocksPort(bare, 1080, "127.0.0.1", "u", "p"), "socks")
+            .getJSONObject("settings")
+        assertEquals("password", settings.getString("auth"))
+        assertEquals("u", settings.getJSONArray("accounts").getJSONObject(0).getString("user"))
+        assertEquals(true, settings.getBoolean("udp"))
     }
 
     @Test

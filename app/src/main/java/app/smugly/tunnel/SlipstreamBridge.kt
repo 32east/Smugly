@@ -38,6 +38,7 @@ object SlipstreamBridge {
     @Volatile private var loaded = false
     @Volatile private var currentPort = 1080
     @Volatile var proxyOnlyMode = true
+    @Volatile var probeNetwork: android.net.Network? = null
     // Anti-fingerprinting: DNS query type (RR type) sent by the native client (16 = TXT default,
     // 65 = HTTPS/SVCB). Applied globally to the main + probe clients right before each native start.
     @Volatile var dnsQueryType = 16
@@ -110,6 +111,7 @@ object SlipstreamBridge {
 
     @JvmStatic
     fun protectSocket(fd: Int): Boolean {
+        probeNetwork?.let { if (bindToNetwork(it, fd)) return true }
         if (proxyOnlyMode) return true
         return try {
             val ok = vpnService?.protect(fd) ?: false
@@ -120,6 +122,15 @@ object SlipstreamBridge {
             false
         }
     }
+
+    private fun bindToNetwork(network: android.net.Network, fd: Int): Boolean =
+        runCatching {
+            android.os.ParcelFileDescriptor.fromFd(fd).use { network.bindSocket(it.fileDescriptor) }
+            true
+        }.getOrElse {
+            AppLog.w(TAG, "bindSocket fd=$fd to $network failed: ${it.message}")
+            false
+        }
 
     fun protectDatagramSocket(socket: DatagramSocket): Boolean {
         if (proxyOnlyMode) return true
@@ -173,6 +184,7 @@ object SlipstreamBridge {
         val transport = resolverTransport.lowercase().takeIf { it == "udp" || it == "tcp" } ?: "tcp"
         val pathMode = if (resolver.authoritative) "authoritative" else "recursive"
         if (nativeIsClientRunning()) stopClient()
+        probeNetwork = null
         runCatching { nativeSetDnsQueryType(dnsQueryType) }
         runCatching { nativeSetDnsLabelLength(dnsLabelLength) }
         runCatching { nativeSetDnsLabelLengthJitter(dnsLabelLengthJitter) }

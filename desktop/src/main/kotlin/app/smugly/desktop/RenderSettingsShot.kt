@@ -7,6 +7,7 @@ import androidx.compose.ui.ImageComposeScene
 import androidx.compose.ui.unit.Density
 import app.smugly.AppLanguage
 import app.smugly.Config
+import app.smugly.RootMode
 import app.smugly.RoutingSettings
 import app.smugly.Strings
 import app.smugly.TunSettings
@@ -29,6 +30,7 @@ fun main(args: Array<String>) {
         autoConnectOnBoot = true,
         allowLan = true
     )
+    val rooted = tuned.copy(rootMode = RootMode.TUN2SOCKS, rootHotspot = true)
 
     fun shot(name: String, height: Int, scrollSteps: List<Int> = listOf(0), width: Int = 1080, content: @Composable (ScrollState) -> Unit) {
         val scroll = ScrollState(0)
@@ -65,6 +67,7 @@ fun main(args: Array<String>) {
             signedIn = signedIn,
             showTunSettings = true,
             showAutoConnect = true,
+            showRootSettings = true,
             startWithAdvanced = advanced,
             scrollState = scroll
         )
@@ -74,6 +77,9 @@ fun main(args: Array<String>) {
     shot("settings-full-default", 7000) { android(phone, true, it) }
     shot("settings-full-tuned", 7000) { android(tuned, true, it) }
     shot("settings-signed-out", 2100) { android(phone, false, it, signedIn = false) }
+    shot("settings-root-off", 7000) { android(phone, true, it) }
+    shot("settings-root-on", 7000) { android(rooted, true, it) }
+    shot("settings-root-on-narrow", 7000, width = 880) { android(rooted, true, it) }
     shot("settings-narrow", 7000, width = 880) { android(tuned.copy(localSocksAuthEnabled = true), true, it) }
     shot("settings-phone", 2100, listOf(0, 1500, 3000, 4500, 99999)) { android(tuned, true, it) }
     shot("settings-desktop", 6000) {

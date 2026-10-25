@@ -20,7 +20,7 @@ class BootReceiver : BroadcastReceiver() {
             AppLog.w(TAG, "auto-connect skipped: proxy mode runs inside the app, not as a service")
             return
         }
-        val consent = runCatching { VpnService.prepare(context) }.getOrNull()
+        val consent = if (global.rootMode.isActive) null else runCatching { VpnService.prepare(context) }.getOrNull()
         if (consent != null) {
             AppLog.w(TAG, "auto-connect skipped: VPN permission has not been granted yet")
             return

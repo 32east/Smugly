@@ -98,7 +98,6 @@ import app.smugly.ui.components.FolderEditorDialog
 import app.smugly.ui.components.FolderTabs
 import app.smugly.ui.components.JsonSyntaxHighlightTransformation
 import app.smugly.ui.components.TomlSyntaxHighlightTransformation
-import app.smugly.effectiveCdnfuToml
 import app.smugly.effectiveS3fuToml
 import androidx.compose.ui.text.input.VisualTransformation
 import app.smugly.ui.components.MenuLayer
@@ -1061,12 +1060,6 @@ fun HomeScreen(
                 if (!accountBound) MenuRow(t(S.MENU_EXPORT_FOLDER)) {
                     folderMenuOpen = false
                     onExportFolder(menuProfiles, menuFolderName)
-                }
-                if (accountBound && onOpenWebCabinet != null) {
-                    MenuRow(t(S.WEB_CABINET)) {
-                        folderMenuOpen = false
-                        onOpenWebCabinet()
-                    }
                 }
                 if (menuSub != null && !accountBound) {
                     MenuRow(t(S.SUBSCRIPTION_DELETE)) {

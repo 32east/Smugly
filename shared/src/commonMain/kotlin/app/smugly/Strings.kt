@@ -82,6 +82,7 @@ enum class S(val en: String, val ru: String) {
     BUY_FULL_SUBSCRIPTION_BTN("Buy a subscription", "Купить подписку"),
     TOAST_ACCOUNT_SIGNED_IN("Signed in", "Вы вошли в аккаунт"),
     TOAST_SUBSCRIPTION_READY("Subscription synced successfully", "Подписка была успешно синхронизирована"),
+    TOAST_SUBSCRIPTION_RENEWED("Subscription renewed", "Подписка продлена"),
     TOAST_ACCESS_REISSUED(
         "Access reissued and already imported into the app",
         "Доступы выпущены и уже импортированы в приложение"
@@ -119,7 +120,16 @@ enum class S(val en: String, val ru: String) {
     PROTOCOL("Protocol", "Протокол"),
     PROTOCOL_SLIPSTREAM("Slipstream (DNS)", "Slipstream (DNS)"),
     PROTOCOL_S3FU("S3 (s3-fuckup)", "S3 (s3-fuckup)"),
-    PROTOCOL_CDNFU("CDN (cdn-fuckup)", "CDN (cdn-fuckup)"),
+    PROTOCOL_TURNFU("VK call (turn-fuckup)", "Звонок VK (turn-fuckup)"),
+    TURNFU_SERVER("Server", "Сервер"),
+    TURNFU_WORKERS("Streams", "Потоков"),
+    TURNFU_MTU("MTU", "MTU"),
+    TURNFU_CALL_TITLE("VK call link", "Ссылка на звонок VK"),
+    SETTINGS_SECTION_TURNFU("VK call", "Звонок VK"),
+    TURNFU_CALL_CONNECT("Connect", "Подключить"),
+    TURNFU_CALL_INVALID("This is not a VK call link", "Это не ссылка на звонок VK"),
+    TURNFU_CAPTCHA_TITLE("VK check", "Проверка VK"),
+    TURNFU_CAPTCHA_NOTIFICATION("VK asks to confirm you are not a robot", "VK просит подтвердить, что вы не робот"),
     PROTOCOL_XRAY("Xray", "Xray"),
     /** Profile-card subtitle: the component actually carrying the traffic. */
     PROTOCOL_XRAY_CORE("Xray-core", "Xray-core"),
@@ -135,19 +145,6 @@ enum class S(val en: String, val ru: String) {
     S3_PSK_HINT("64 hex chars", "64 hex-символа"),
 
     // cdn-fuckup (XHTTP packet-up)
-    CDNFU_URL("URL", "URL"),
-    CDNFU_URL_HINT("https://edge.example/", "https://edge.example/"),
-    CDNFU_HOST("Host header", "Host-заголовок"),
-    CDNFU_HOST_HINT("blank = from URL", "пусто = из URL"),
-    CDNFU_PSK("PSK", "PSK"),
-    CDNFU_PSK_HINT("passphrase", "пароль (PSK)"),
-    CDNFU_MIMIC("Path mimic", "Mimic путей"),
-    CDNFU_UPLINK_METHOD("Uplink method", "Метод uplink"),
-    CDNFU_UPLINK_PATH("Uplink path", "Путь uplink"),
-    CDNFU_UPLINK_DATA("Uplink data", "Данные uplink"),
-    CDNFU_XHTTP_PLACEMENT("XHTTP placement", "XHTTP placement"),
-    CDNFU_DOWNLINK("Downlink", "Downlink"),
-    CDNFU_MULTIPATH("Multipath paths", "Multipath paths"),
 
     // Xray
     XRAY_SECTION("Xray configuration", "Конфигурация Xray"),
@@ -345,6 +342,11 @@ enum class S(val en: String, val ru: String) {
     SETTINGS_SECTION_LOCAL_PROXY("Local proxy", "Локальный прокси"),
     SETTINGS_SECTION_SLIPSTREAM("Slipstream", "Slipstream"),
     SETTINGS_SECTION_DEBUG("Debugging", "Отладка"),
+    SETTINGS_SECTION_ROOT("Root", "Root"),
+    ROOT_MODE("Hide VPN from apps", "Скрыть VPN от приложений"),
+    ROOT_HOTSPOT("Share VPN over hotspot", "Раздавать VPN через точку доступа"),
+    TOAST_ROOT_DENIED("root access was not granted", "root-доступ не выдан"),
+    TOAST_ROOT_START_FAILED("root tunnel did not start", "не удалось поднять root-туннель"),
     DEBUG_MODE_HINT("Keeps a log for Diagnostics", "Пишет журнал для «Диагностики»"),
     AUTO_CONNECT_ON_BOOT("Connect when the device starts", "Подключаться при включении устройства"),
     TUN_MTU("MTU", "MTU"),
@@ -352,7 +354,6 @@ enum class S(val en: String, val ru: String) {
     TUN_IPV6("Send IPv6 through the tunnel", "Пускать IPv6 через туннель"),
     TUN_BYPASS_LAN("Keep the local network out of the tunnel", "Не пускать локальную сеть в туннель"),
     TUN_DNS("DNS servers", "DNS-серверы"),
-    TUN_DNS_HINT("Comma-separated", "Через запятую"),
     TUN_DNS_INVALID("Not an IP address", "Не IP-адрес"),
     ROUTE_DIRECT_RU("Russian sites go direct", "Российские сайты напрямую"),
     ROUTE_BLOCK_ADS("Block ads", "Блокировать рекламу"),
@@ -471,7 +472,7 @@ enum class S(val en: String, val ru: String) {
     PROFILE_NAME_DEFAULT_IMPORTED("Profile", "Профиль"),
     PROFILE_NAME_DEFAULT("Slipstream profile", "Профиль Slipstream"),
     PROFILE_NAME_DEFAULT_S3FU("S3 profile", "S3-профиль"),
-    PROFILE_NAME_DEFAULT_CDNFU("CDN profile", "CDN-профиль"),
+    PROFILE_NAME_DEFAULT_TURNFU("VK call profile", "Профиль звонка VK"),
     PROFILE_NAME_DEFAULT_XRAY("Xray profile", "Профиль Xray"),
 }
 

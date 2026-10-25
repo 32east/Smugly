@@ -28,7 +28,6 @@ import org.json.JSONObject
  *    That traverses resolver → authoritative → back, which is the tunnel's carrier; a resolver
  *    that answers for anything else but not for this domain is exactly the failure to catch.
  *  * **s3fu** — TCP+TLS reach to the storage endpoint, the only host the client ever talks to.
- *  * **cdnfu** — TCP reach to the CDN edge host in the profile URL.
  *  * **Xray** — TCP reach to the outbound server named in the config.
  *
  * A failure is reported as a failure rather than a large number: "unreachable" and "slow" are
@@ -41,8 +40,8 @@ object LatencyProbe {
         when (config.protocol) {
             Config.TunnelProtocol.SLIPSTREAM -> measureSlipstream(config)
             Config.TunnelProtocol.S3FU -> measureS3fu(config)
-            Config.TunnelProtocol.CDNFU -> measureCdnfu(config)
             Config.TunnelProtocol.XRAY -> measureXray(config)
+            Config.TunnelProtocol.TURNFU -> error("a VK call tunnel has no reachability probe")
         }
     }
 
@@ -77,15 +76,6 @@ object LatencyProbe {
         require(endpoint.isNotEmpty()) { "no S3 endpoint configured" }
         val uri = URI(if (endpoint.contains("://")) endpoint else "https://$endpoint")
         val host = uri.host ?: error("bad S3 endpoint '$endpoint'")
-        val port = if (uri.port > 0) uri.port else if (uri.scheme == "http") 80 else 443
-        return tcpRoundTrip(host, port)
-    }
-
-    private fun measureCdnfu(config: Config): Int {
-        val endpoint = config.cdnfuUrl.trim()
-        require(endpoint.isNotEmpty()) { "no URL configured" }
-        val uri = URI(if (endpoint.contains("://")) endpoint else "https://$endpoint")
-        val host = uri.host ?: error("bad URL '$endpoint'")
         val port = if (uri.port > 0) uri.port else if (uri.scheme == "http") 80 else 443
         return tcpRoundTrip(host, port)
     }

@@ -99,4 +99,18 @@ class PerAppFilterTest {
         assertEquals(emptySet(), PerAppPackages.decode(""))
         assertEquals(emptySet(), PerAppPackages.decode("\n \n"))
     }
+
+    @Test
+    fun includeSelfKeepsTheAppInsideTheTunnel() {
+        assertEquals(emptyList(), PerAppFilter.plan(PerAppMode.OFF, emptySet(), OWN, includeSelf = true).disallowed)
+        assertEquals(
+            listOf("com.telegram"),
+            PerAppFilter.plan(PerAppMode.DISALLOWED, setOf("com.telegram"), OWN, includeSelf = true).disallowed
+        )
+        assertEquals(
+            listOf(OWN, "com.telegram").sorted(),
+            PerAppFilter.plan(PerAppMode.ALLOWED, setOf("com.telegram"), OWN, includeSelf = true).allowed
+        )
+        assertEquals(emptyList(), PerAppFilter.plan(PerAppMode.ALLOWED, emptySet(), OWN, includeSelf = true).disallowed)
+    }
 }

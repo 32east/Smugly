@@ -77,8 +77,8 @@ android {
             // libs3fu.so is staged here by the cargoBuildS3fu task (kept separate from the
             // rust-android plugin's managed dir so the plugin never clobbers it).
             jniLibs.srcDir("build/s3fuJniLibs")
-            // libcdnfu.so staged by cargoBuildCdnfu (cdn-fuckup XHTTP packet-up).
-            jniLibs.srcDir("build/cdnfuJniLibs")
+            jniLibs.srcDir("build/turnfuJniLibs")
+            jniLibs.srcDir("build/hevRootJniLibs")
         }
     }
 
@@ -196,20 +196,6 @@ val cargoBuildS3fu by tasks.registering(Exec::class) {
     }
 }
 
-// Build libcdnfu.so (cdn-fuckup XHTTP packet-up) for arm64. Same pattern as s3fu:
-// separate workspace at ../../../cdn-fuckup, staged outside the rust-android dir.
-val cargoBuildCdnfu by tasks.registering(Exec::class) {
-    val moduleDir = file("$projectDir/../../../cdn-fuckup")
-    val outDir = file("$projectDir/build/cdnfuJniLibs/arm64-v8a")
-    workingDir = moduleDir
-    commandLine("bash", "${moduleDir.absolutePath}/build-android.sh")
-    doFirst {
-        outDir.mkdirs()
-        environment("ANDROID_NDK_HOME", android.ndkDirectory.absolutePath)
-        environment("CDNFU_OUT_DIR", outDir.absolutePath)
-    }
-}
-
 // Build libxray.aar (Xray-core via gomobile bind). Unlike the Rust crates this is
 // NOT rebuilt on every build -- a gomobile bind of the whole Xray dependency tree
 // takes minutes and the wrapper changes rarely. It only runs when the AAR is
@@ -223,9 +209,34 @@ val buildXrayAar by tasks.registering(Exec::class) {
     onlyIf { !xrayAar.exists() }
 }
 
+val buildHevRoot by tasks.registering(Exec::class) {
+    val cppDir = file("$projectDir/src/main/cpp")
+    val workDir = file("$projectDir/build/hevRootNdk")
+    val outDir = file("$projectDir/build/hevRootJniLibs/arm64-v8a")
+    inputs.dir(cppDir)
+    outputs.dir(outDir)
+    doFirst {
+        workDir.mkdirs()
+        outDir.mkdirs()
+        val script = if (System.getProperty("os.name").startsWith("Windows")) "ndk-build.cmd" else "ndk-build"
+        commandLine(
+            android.ndkDirectory.resolve(script).absolutePath,
+            "NDK_PROJECT_PATH=null",
+            "APP_BUILD_SCRIPT=${cppDir.absolutePath}/root/Android.mk",
+            "NDK_APPLICATION_MK=${cppDir.absolutePath}/Application.mk",
+            "NDK_OUT=${workDir.absolutePath}/obj",
+            "NDK_LIBS_OUT=${workDir.absolutePath}/libs",
+            "hevroot"
+        )
+    }
+    doLast {
+        File(workDir, "obj/local/arm64-v8a/hevroot").copyTo(File(outDir, "libhevroot.so"), overwrite = true)
+    }
+}
+
 tasks.named("preBuild") {
+    dependsOn(buildHevRoot)
     dependsOn("cargoBuildArm64")
     dependsOn(cargoBuildS3fu)
-    dependsOn(cargoBuildCdnfu)
     dependsOn(buildXrayAar)
 }

@@ -49,7 +49,7 @@ object SubscriptionParser {
         // Config.importProfileFromText understands has to be listed here: a link that is
         // missing is dropped silently, and if it was the only member of a category the
         // whole group vanishes from the folder with no error anywhere.
-        "slipstream://", "s3fu://", "cdnfu://", "xray://"
+        "slipstream://", "s3fu://", "turnfu2://", "xray://"
     )
 
     /**

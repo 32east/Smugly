@@ -154,22 +154,22 @@ class SubscriptionParserTest {
 
     // Every scheme the importer understands must be here. A missing one is dropped with no
     // error, and a category holding only that protocol disappears from the folder entirely —
-    // which is exactly what `cdnfu://` did to «Обход БС [CDN]».
+    // which once happened to a whole «Обход БС» category.
     @Test
     fun appOwnSchemesAreAccepted() {
         val body = "slipstream://import?config=abc\ns3fu://import?config=def\n" +
-            "cdnfu://import?url=http%3A%2F%2Fedge.example&psk=deadbeef\nxray://import?config=ghi"
+            "turnfu2://fixturehost=edge.example&password=deadbeef\nxray://import?config=ghi"
         assertEquals(4, SubscriptionParser.parse(body).links.size)
     }
 
     @Test
-    fun aCategoryHoldingOnlyACdnLinkSurvives() {
+    fun aCategoryHoldingOnlyACallLinkSurvives() {
         val body = buildString {
-            appendLine("#category: Обход БС [CDN]")
-            appendLine("cdnfu://import?url=http%3A%2F%2Fedge.example&psk=deadbeef&name=Spain")
+            appendLine("#category: Обход БС [Звонок VK]")
+            appendLine("turnfu2://fixturehost=edge.example&password=deadbeef&name=Spain")
         }
         val parsed = SubscriptionParser.parse(body)
-        assertEquals(listOf("Обход БС [CDN]"), parsed.categories.map { it.name })
+        assertEquals(listOf("Обход БС [Звонок VK]"), parsed.categories.map { it.name })
         assertEquals(1, parsed.links.size)
     }
 

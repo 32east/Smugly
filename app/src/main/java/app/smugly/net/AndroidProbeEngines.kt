@@ -4,12 +4,12 @@ import android.content.Context
 import app.smugly.Config
 import app.smugly.ResolverSelector
 import app.smugly.XrayConfigBuilder
-import app.smugly.effectiveCdnfuToml
 import app.smugly.effectiveS3fuToml
-import app.smugly.tunnel.CdnfuBridge
 import app.smugly.tunnel.ResolverListConfig
+import app.smugly.tunnel.RootTunnel
 import app.smugly.tunnel.S3fuBridge
 import app.smugly.tunnel.SlipstreamBridge
+import app.smugly.tunnel.TurnfuProcess
 import app.smugly.tunnel.XrayBridge
 import app.smugly.util.AppLog
 import java.io.File
@@ -21,7 +21,7 @@ import java.net.Socket
  *
  * Every engine here runs *beside* the live tunnel rather than instead of it: measuring a row's
  * latency while connected must not drop the connection. That is why Xray gets its own core
- * instance and Slipstream, s3fu and cdnfu use their probe-client entry points (keyed by listen port).
+ * instance and Slipstream and s3fu use their probe-client entry points (keyed by listen port).
  */
 class AndroidProbeEngines(context: Context) : E2ELatencyProbe.Launcher {
     private val appContext = context.applicationContext
@@ -30,13 +30,13 @@ class AndroidProbeEngines(context: Context) : E2ELatencyProbe.Launcher {
         Config.TunnelProtocol.XRAY -> XrayBridge.isLoaded()
         Config.TunnelProtocol.SLIPSTREAM -> SlipstreamBridge.isLoaded()
         Config.TunnelProtocol.S3FU -> S3fuBridge.isLoaded()
-        Config.TunnelProtocol.CDNFU -> CdnfuBridge.isLoaded()
+        Config.TunnelProtocol.TURNFU -> false
     }
 
     override fun readyTimeoutMs(protocol: Config.TunnelProtocol): Long = when (protocol) {
         // Xray binds its inbound during startLoop; anything past a second means it did not start.
         Config.TunnelProtocol.XRAY -> 5_000
-        Config.TunnelProtocol.S3FU, Config.TunnelProtocol.CDNFU -> 5_000
+        Config.TunnelProtocol.S3FU -> 5_000
         // A DNS tunnel has a QUIC handshake to finish over a carrier that is slow by design. Kept
         // close to the resolver selector's own 5s probe budget because a dead candidate costs this
         // whole timeout before the next one is tried.
@@ -59,7 +59,7 @@ class AndroidProbeEngines(context: Context) : E2ELatencyProbe.Launcher {
             Config.TunnelProtocol.XRAY -> launchXray(config, socksPort)
             Config.TunnelProtocol.SLIPSTREAM -> launchSlipstream(config, socksPort)
             Config.TunnelProtocol.S3FU -> launchS3fu(config, socksPort)
-            Config.TunnelProtocol.CDNFU -> launchCdnfu(config, socksPort)
+            Config.TunnelProtocol.TURNFU -> error("turnfu has no probe engine")
         }
 
     private fun launchS3fu(config: Config, socksPort: Int): E2ELatencyProbe.Session {
@@ -73,16 +73,6 @@ class AndroidProbeEngines(context: Context) : E2ELatencyProbe.Launcher {
         )
     }
 
-    private fun launchCdnfu(config: Config, socksPort: Int): E2ELatencyProbe.Session {
-        val listen = "127.0.0.1:$socksPort"
-        CdnfuBridge.startProbe(config.effectiveCdnfuToml(), listen).getOrThrow()
-        return nativeProbeSession(
-            socksPort,
-            isRunning = { CdnfuBridge.isProbeRunning(listen) },
-            lastError = { CdnfuBridge.probeLastError(listen) },
-            stop = { CdnfuBridge.stopProbe(listen) }
-        )
-    }
 
     private fun nativeProbeSession(
         socksPort: Int,
@@ -132,6 +122,7 @@ class AndroidProbeEngines(context: Context) : E2ELatencyProbe.Launcher {
         // Every inbound replaced, not just the SOCKS one: panel configs also carry an HTTP inbound
         // on a fixed port, and two probes (or a probe next to the live tunnel) would collide on it.
         val json = XrayConfigBuilder.withOnlySocksInbound(config.xrayConfigJson, socksPort)
+        XrayBridge.setDialNetwork(if (XrayBridge.isRunning()) 0L else tunnelBypassNetwork()?.networkHandle ?: 0L)
         val instance = XrayBridge.startInstance(json).getOrThrow()
         return object : E2ELatencyProbe.Session {
             override fun awaitReady(timeoutMs: Long): Boolean =
@@ -157,6 +148,7 @@ class AndroidProbeEngines(context: Context) : E2ELatencyProbe.Launcher {
             .filter { config.resolverMode != Config.ResolverMode.AUTO || it.transport == config.resolverTransport }
             .take(if (config.resolverMode == Config.ResolverMode.AUTO) 1 else MAX_RESOLVER_CANDIDATES)
         require(candidates.isNotEmpty()) { "no resolver to try — set one, or connect once on this network" }
+        SlipstreamBridge.probeNetwork = if (SlipstreamBridge.isRunning()) null else tunnelBypassNetwork()
 
         // Only one candidate can hold the port at a time, so they are tried in turn and the first
         // one whose QUIC session comes up is the one measured.
@@ -255,6 +247,14 @@ class AndroidProbeEngines(context: Context) : E2ELatencyProbe.Launcher {
             SlipstreamBridge.maxDataQps = maxData
             SlipstreamBridge.base64uEncoding = base64u
         }
+    }
+
+    private fun tunnelBypassNetwork(): android.net.Network? {
+        val cm = appContext.getSystemService(android.net.ConnectivityManager::class.java) ?: return null
+        val own = cm.activeNetwork?.let { cm.getNetworkCapabilities(it) }
+        val ownViaVpn = own != null && !own.hasCapability(android.net.NetworkCapabilities.NET_CAPABILITY_NOT_VPN)
+        if (!ownViaVpn && !RootTunnel.routesOwnUid()) return null
+        return TurnfuProcess.physicalNetwork(appContext)
     }
 
     private fun awaitPort(port: Int, timeoutMs: Long): Boolean {

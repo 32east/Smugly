@@ -98,8 +98,8 @@ class E2ELatencyProbeTest {
     }
 
     @Test
-    fun `s3fu and cdnfu are timed after a warm-up request, not on the session-opening one`() {
-        for (protocol in listOf(Config.TunnelProtocol.S3FU, Config.TunnelProtocol.CDNFU)) {
+    fun `s3fu is timed after a warm-up request, not on the session-opening one`() {
+        for (protocol in listOf(Config.TunnelProtocol.S3FU)) {
             FakeSocksEngine(firstAnswerDelayMs = 1_500).use { engine ->
                 val result = E2ELatencyProbe.measure(defaultConfig().copy(protocol = protocol), engine.launcher())
                 assertTrue(result.isSuccess, "$protocol probe failed: ${result.exceptionOrNull()?.message}")

@@ -9,7 +9,7 @@ package app.smugly
  * The profile now carries the config file itself and the engine parses it, which makes
  * "what the app can set" and "what the engine understands" the same set for good.
  *
- * [forS3fu] / [forCdnfu] render a config from the legacy per-field values. That is how
+ * [forS3fu] renders a config from the legacy per-field values. That is how
  * profiles made by older builds (and links that still carry query parameters) keep
  * working: nothing is rewritten on disk, the text is simply derived when the stored one
  * is blank. The moment the user edits the box, their text wins — see [effectiveS3fuToml].
@@ -82,63 +82,6 @@ object TunnelToml {
         val v = raw.trim()
         return if (v.isEmpty() || v.equals("auto", ignoreCase = true)) fallback else v
     }
-
-    fun forCdnfu(c: Config): String = buildString {
-        appendLine("# cdn-fuckup client config. Everything cdnfu's config file supports works here;")
-        appendLine("# see configs/client.toml in the cdn-fuckup repo for the full list.")
-        appendLine("# listen is set by the app and ignored here.")
-        appendLine("url  = ${q(c.cdnfuUrl)}")
-        // Host is what the edge is addressed as when url points at an IP; blank = take it
-        // from the url itself.
-        appendLine("host = ${q(c.cdnfuHost)}")
-        appendLine("psk  = ${q(c.cdnfuPsk)}")
-        appendLine()
-        appendLine("[path]")
-        appendLine("mimic = ${q(knob(c.cdnfuMimic, "mixed"))}")
-        appendLine()
-        appendLine("[uplink]")
-        appendLine("method = ${q(knob(c.cdnfuUplinkMethod, "POST"))}")
-        appendLine("path   = ${q(knob(c.cdnfuUplinkPath, "api"))}")
-        appendLine("data   = ${q(knob(c.cdnfuUplinkData, "body"))}")
-        // Uplink depth is what upload speed rides on: every post costs a round trip
-        // through the edge, and only overlapping them amortises it.
-        appendLine("pipeline = 16")
-        appendLine()
-        appendLine("[downlink]")
-        appendLine("mode = ${q(knob(c.cdnfuDownlinkMode, "stream"))}")
-        appendLine("udp_mode = \"stream\"")
-        appendLine("poll_depth = 2")
-        appendLine("udp_poll_depth = 8")
-        // The tunnel's NAT lease: dropping the session drops the server's UDP socket, so a
-        // hole-punched peer (Parsec, WebRTC) is left sending to a port that no longer exists.
-        // 90s matched hev's old udp-read-write-timeout and remapped Parsec after a pause
-        // (2026-08-15). 1h is the same lease hev now uses.
-        appendLine("udp_idle_secs = 3600")
-        appendLine()
-        appendLine("[xhttp]")
-        val placement = knob(c.cdnfuXhttpPlacement, "cookie")
-        appendLine("session_placement = ${q(placement)}")
-        appendLine("seq_placement     = ${q(placement)}")
-        appendLine("pad_placement     = ${q(placement)}")
-        appendLine("data_placement    = ${q(placement)}")
-        appendLine("cookie_token      = true")
-        appendLine()
-        appendLine("[multipath]")
-        // 0/1 = single path. Striping holds a pool permit per path for a whole TCP flow,
-        // so a high count deadlocks as soon as an app opens many sockets at once.
-        appendLine("paths = ${if (c.cdnfuMultipath <= 0) 1 else c.cdnfuMultipath}")
-        appendLine()
-        appendLine("[pool]")
-        // 0 = unlimited concurrent packet-up sessions. A hard cap starves browsers and
-        // speed tests (parallel TLS + DoH + ads) and freezes every flow.
-        appendLine("size = 0")
-        appendLine()
-        appendLine("[tls]")
-        appendLine("chrome = 137")
-        // h1 bodies are buffered by reverse-proxy edges, h2 frames are not — this one flag
-        // silently killed every streaming downlink.
-        appendLine("http1_only = false")
-    }
 }
 
 /**
@@ -148,6 +91,3 @@ object TunnelToml {
 fun Config.effectiveS3fuToml(): String =
     s3fuToml.ifBlank { TunnelToml.forS3fu(this) }
 
-/** As [effectiveS3fuToml], for cdnfu. */
-fun Config.effectiveCdnfuToml(): String =
-    cdnfuToml.ifBlank { TunnelToml.forCdnfu(this) }

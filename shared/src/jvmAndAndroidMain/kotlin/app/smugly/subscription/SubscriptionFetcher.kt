@@ -36,7 +36,13 @@ object SubscriptionFetcher {
     )
 
     /** An HTTP proxy to route the request through; null means a direct connection. */
-    data class ProxySpec(val host: String, val port: Int, val socks: Boolean = true) {
+    data class ProxySpec(
+        val host: String,
+        val port: Int,
+        val socks: Boolean = true,
+        val username: String? = null,
+        val password: String? = null
+    ) {
         /**
          * SOCKS by default, because that is what the local listener actually speaks.
          *
@@ -45,10 +51,15 @@ object SubscriptionFetcher {
          * tunnel" attempt could never succeed, and a panel that is blocked on the bare mobile
          * network failed both ways round with "Failed to connect".
          */
-        fun toJavaProxy(): java.net.Proxy = java.net.Proxy(
-            if (socks) java.net.Proxy.Type.SOCKS else java.net.Proxy.Type.HTTP,
-            java.net.InetSocketAddress(host, port)
-        )
+        fun toJavaProxy(): java.net.Proxy {
+            if (socks) app.smugly.net.LocalSocksAuth.register(port, username, password)
+            return java.net.Proxy(
+                if (socks) java.net.Proxy.Type.SOCKS else java.net.Proxy.Type.HTTP,
+                java.net.InetSocketAddress(host, port)
+            )
+        }
+
+        override fun toString(): String = "ProxySpec(${if (socks) "socks" else "http"} $host:$port)"
     }
 
     /**

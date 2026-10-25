@@ -33,54 +33,27 @@ data class Config(
      *  namespace, so there is no separate login. */
     val s3Psk: String = "",
     val xrayConfigJson: String = "",
-    // ---- cdn-fuckup (XHTTP packet-up over CDN / reverse proxy) ----
-    /** Base URL of the edge, e.g. `https://jarvis-media.ru/` — or a bare edge IP such
-     *  as `http://151.236.109.225/`, paired with [cdnfuHost]. */
-    val cdnfuUrl: String = "",
-    /**
-     * Hostname to present when [cdnfuUrl] points at an IP: it becomes the `Host`
-     * header (and HTTP/2 `:authority` / TLS SNI) while the connection goes to that IP.
-     * Blank = take the name from the URL as usual.
-     *
-     * Needed when a CDN only serves the resource from one particular edge, or when DNS
-     * hands out an edge that doesn't answer.
-     */
-    val cdnfuHost: String = "",
-    /** ChaCha20-Poly1305 passphrase (empty = VLESS uuid mode, not used in UI). */
-    val cdnfuPsk: String = "",
-    /** Path cover: image | video | static | mixed. */
-    val cdnfuMimic: String = "mixed",
-    /** Uplink HTTP method: POST | PUT | GET | … (blank → auto). */
-    val cdnfuUplinkMethod: String = "POST",
-    /** Uplink path family: auto | asset | api. */
-    val cdnfuUplinkPath: String = "api",
-    /** Where ciphertext rides: body | query | cookie | auto. */
-    val cdnfuUplinkData: String = "body",
-    /** XHTTP meta placement for session/seq/pad: cookie | query. */
-    val cdnfuXhttpPlacement: String = "cookie",
-    /** Downlink: poll (safe behind buffering edges) | stream | auto. */
-    val cdnfuDownlinkMode: String = "stream",
-    /**
-     * Parallel packet-up sessions per SOCKS TCP. 0 / 1 = single path (recommended on
-     * Android); 2..=4 = multipath striping for lab benches only.
-     */
-    val cdnfuMultipath: Int = 1,
     /**
      * Whole client config as TOML, edited as text in the profile screen — the same file
      * the `s3fu --config` CLI reads. Blank = derive one from the fields above, which is
      * what every profile made before this existed does (see [effectiveS3fuToml]).
      */
     val s3fuToml: String = "",
-    /** As [s3fuToml], for cdn-fuckup (`cdnfu --config`). */
-    val cdnfuToml: String = "",
-    val xrayManual: Boolean = false
+    val xrayManual: Boolean = false,
+    val turnfuHost: String = "",
+    val turnfuPort: Int = 46000,
+    val turnfuPassword: String = "",
+    val turnfuWorkers: Int = 20,
+    val turnfuMtu: Int = 1200,
+    val turnfuCalls: List<String> = emptyList(),
+    val turnfuToken: String = ""
 ) {
     enum class Mode { PROXY, VPN }
     enum class AuthMode { NO_AUTH, LOGIN_PASSWORD }
     enum class ResolverMode { MANUAL, AUTO }
     enum class ResolverTransport { UDP, TCP }
     enum class ResolverPathMode { RECURSIVE, AUTHORITATIVE }
-    enum class TunnelProtocol { SLIPSTREAM, S3FU, XRAY, CDNFU }
+    enum class TunnelProtocol { SLIPSTREAM, S3FU, XRAY, TURNFU }
 }
 
 fun Config.needsVpnService(): Boolean =
@@ -106,7 +79,8 @@ data class ConfigProfile(
 object DnsResolverPool {
     const val LOCAL_SENTINEL = "(local)"
     private const val LOCAL_SENTINEL_LEGACY = "(local dns-resolvers)"
-    const val DEFAULT_RAW = "(local)\n82.151.127.188\n188.0.190.47\n185.22.235.137\n46.254.19.23"
+    const val DEFAULT_RAW = LOCAL_SENTINEL
+    private val RETIRED = setOf("82.151.127.188", "188.0.190.47", "185.22.235.137", "46.254.19.23")
 
     fun parse(raw: String): List<String> =
         raw.lineSequence().map { it.trim() }.filter { it.isNotBlank() }.distinct().toList()
@@ -125,13 +99,16 @@ object DnsResolverPool {
         entry.equals(LOCAL_SENTINEL, ignoreCase = true) ||
             entry.equals(LOCAL_SENTINEL_LEGACY, ignoreCase = true)
 
-    fun normalize(raw: String): String =
-        raw.lineSequence()
+    fun normalize(raw: String): String {
+        val lines = raw.lineSequence()
+            .filter { it.trim() !in RETIRED }
             .map { line ->
                 val trimmed = line.trim()
                 if (trimmed.equals(LOCAL_SENTINEL_LEGACY, ignoreCase = true)) LOCAL_SENTINEL else line
             }
-            .joinToString("\n")
+            .toList()
+        return if (lines.all { it.isBlank() }) DEFAULT_RAW else lines.joinToString("\n")
+    }
 }
 
 data class GlobalSettings(
@@ -190,7 +167,9 @@ data class GlobalSettings(
     val tun: TunSettings = TunSettings(),
     val routing: RoutingSettings = RoutingSettings(),
     val autoConnectOnBoot: Boolean = false,
-    val allowLan: Boolean = false
+    val allowLan: Boolean = false,
+    val rootMode: RootMode = RootMode.OFF,
+    val rootHotspot: Boolean = false
 ) {
     companion object {
         const val DEFAULT_LOCAL_SOCKS_USERNAME = "smugly"
@@ -238,10 +217,13 @@ object ExtraSettingsCodec {
     private const val ROUTE_BLOCK_ADS = "routeBlockAds"
     private const val AUTO_CONNECT_ON_BOOT = "autoConnectOnBoot"
     private const val ALLOW_LAN = "allowLan"
+    private const val ROOT_MODE = "rootMode"
+    private const val ROOT_HOTSPOT = "rootHotspot"
 
     val keys: List<String> = listOf(
         TUN_MTU, TUN_IPV6, TUN_BYPASS_LAN, TUN_DNS,
-        ROUTE_DIRECT_RU, ROUTE_BLOCK_ADS, AUTO_CONNECT_ON_BOOT, ALLOW_LAN
+        ROUTE_DIRECT_RU, ROUTE_BLOCK_ADS, AUTO_CONNECT_ON_BOOT, ALLOW_LAN,
+        ROOT_MODE, ROOT_HOTSPOT
     )
 
     fun encode(s: GlobalSettings): Map<String, String> = mapOf(
@@ -252,7 +234,9 @@ object ExtraSettingsCodec {
         ROUTE_DIRECT_RU to s.routing.directRu.toString(),
         ROUTE_BLOCK_ADS to s.routing.blockAds.toString(),
         AUTO_CONNECT_ON_BOOT to s.autoConnectOnBoot.toString(),
-        ALLOW_LAN to s.allowLan.toString()
+        ALLOW_LAN to s.allowLan.toString(),
+        ROOT_MODE to s.rootMode.name.lowercase(),
+        ROOT_HOTSPOT to s.rootHotspot.toString()
     )
 
     fun decode(base: GlobalSettings, read: (String) -> String?): GlobalSettings {
@@ -278,7 +262,9 @@ object ExtraSettingsCodec {
                 blockAds = bool(ROUTE_BLOCK_ADS, routingDefaults.blockAds)
             ),
             autoConnectOnBoot = bool(AUTO_CONNECT_ON_BOOT, false),
-            allowLan = bool(ALLOW_LAN, false)
+            allowLan = bool(ALLOW_LAN, false),
+            rootMode = RootMode.parse(read(ROOT_MODE)),
+            rootHotspot = bool(ROOT_HOTSPOT, false)
         )
     }
 }
@@ -293,7 +279,10 @@ fun GlobalSettings.needsReconnectToApply(next: GlobalSettings): Boolean =
         appHttpProxy != next.appHttpProxy ||
         tun != next.tun ||
         routing != next.routing ||
-        allowLan != next.allowLan
+        allowLan != next.allowLan ||
+        rootMode != next.rootMode ||
+        rootHotspot != next.rootHotspot ||
+        (rootMode.isActive && (perAppMode != next.perAppMode || perAppPackages != next.perAppPackages))
 
 fun GlobalSettings.resetToDefaults(defaultMode: Config.Mode): GlobalSettings =
     GlobalSettings(

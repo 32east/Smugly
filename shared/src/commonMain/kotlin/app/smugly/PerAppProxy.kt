@@ -5,7 +5,7 @@ package app.smugly
  *
  * This is a property of the *tunnel*, not of a profile — it is applied to the TUN itself
  * (`VpnService.Builder`), so it holds for every protocol the app can carry (Slipstream DNS,
- * S3FU, CDNFU, Xray) without any of them knowing about it.
+ * S3FU, Xray) without any of them knowing about it.
  */
 enum class PerAppMode {
     /** Everything goes through the tunnel (what the app has always done). */
@@ -28,7 +28,7 @@ enum class PerAppMode {
  * - **Never both lists.** Android throws `UnsupportedOperationException` the moment a builder
  *   is given an allowed *and* a disallowed package, so a plan carries exactly one of them.
  * - **Our own package never rides the tunnel.** Every protocol dials its server from this very
- *   process (Xray, s3fu, cdnfu and the DNS client all run in-app), so routing ourselves back
+ *   process (Xray, s3fu and the DNS client all run in-app), so routing ourselves back
  *   into the TUN is a loop. In [PerAppMode.DISALLOWED] that means adding ourselves to the
  *   exclusions; in [PerAppMode.ALLOWED] it means we simply never appear in the allow list —
  *   which is also why the picker hides this app.
@@ -50,24 +50,25 @@ object PerAppFilter {
         val fellBackToOff: Boolean = false
     )
 
-    fun plan(mode: PerAppMode, packages: Set<String>, ownPackage: String): Plan {
+    fun plan(mode: PerAppMode, packages: Set<String>, ownPackage: String, includeSelf: Boolean = false): Plan {
         val picked = packages.asSequence()
             .map { it.trim() }
             .filter { it.isNotEmpty() && it != ownPackage }
             .distinct()
             .sorted()
             .toList()
+        val self = if (includeSelf) emptyList() else listOf(ownPackage)
         return when {
             mode == PerAppMode.ALLOWED && picked.isNotEmpty() ->
-                Plan(allowed = picked, disallowed = emptyList())
+                Plan(allowed = if (includeSelf) (picked + ownPackage).sorted() else picked, disallowed = emptyList())
 
             mode == PerAppMode.ALLOWED ->
-                Plan(allowed = emptyList(), disallowed = listOf(ownPackage), fellBackToOff = true)
+                Plan(allowed = emptyList(), disallowed = self, fellBackToOff = true)
 
             mode == PerAppMode.DISALLOWED ->
-                Plan(allowed = emptyList(), disallowed = (picked + ownPackage).distinct().sorted())
+                Plan(allowed = emptyList(), disallowed = (picked + self).distinct().sorted())
 
-            else -> Plan(allowed = emptyList(), disallowed = listOf(ownPackage))
+            else -> Plan(allowed = emptyList(), disallowed = self)
         }
     }
 }

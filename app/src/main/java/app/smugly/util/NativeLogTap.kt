@@ -7,7 +7,7 @@ import java.util.Locale
 
 object NativeLogTap {
     private const val TAG = "NativeLogTap"
-    private val ENGINE_TAGS = listOf("s3fu", "cdnfu")
+    private val ENGINE_TAGS = listOf("s3fu")
     private val LOGCAT_LINE = Regex("""^([VDIWEFA])/([^\s:]+)\s*: ?(.*)$""")
     private val TRACING_LINE = Regex("""^\d{4}-\d{2}-\d{2}T\S+\s+(TRACE|DEBUG|INFO|WARN|ERROR)\s+(.*)$""")
     private const val RESTART_MIN_MS = 1_000L

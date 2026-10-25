@@ -57,7 +57,6 @@ import app.smugly.Config
 import app.smugly.S
 import app.smugly.XrayForm
 import app.smugly.XrayFormProtocol
-import app.smugly.effectiveCdnfuToml
 import app.smugly.effectiveS3fuToml
 import app.smugly.t
 import app.smugly.ui.EditorDraft
@@ -139,7 +138,7 @@ fun ProfileEditorScreen(
     val protocols = listOf(
         Config.TunnelProtocol.SLIPSTREAM to t(S.PROTOCOL_SLIPSTREAM),
         Config.TunnelProtocol.S3FU to t(S.PROTOCOL_S3FU),
-        Config.TunnelProtocol.CDNFU to t(S.PROTOCOL_CDNFU),
+        Config.TunnelProtocol.TURNFU to t(S.PROTOCOL_TURNFU),
         Config.TunnelProtocol.XRAY to t(S.PROTOCOL_XRAY)
     )
     var menu by remember { mutableStateOf<EditorMenu?>(null) }
@@ -154,7 +153,8 @@ fun ProfileEditorScreen(
     }
     val isXray = c.protocol == Config.TunnelProtocol.XRAY
     val manualXray = isXray && c.xrayManual
-    val isCodeProfile = !manualXray && c.protocol != Config.TunnelProtocol.SLIPSTREAM
+    val isCodeProfile = !manualXray && c.protocol != Config.TunnelProtocol.SLIPSTREAM &&
+        c.protocol != Config.TunnelProtocol.TURNFU
 
     val setInputMode: (Boolean) -> Unit = { manual ->
         if (manual != c.xrayManual) {
@@ -223,14 +223,6 @@ fun ProfileEditorScreen(
                         format = { null },
                         modifier = editorModifier
                     )
-                    Config.TunnelProtocol.CDNFU -> CodeEditor(
-                        text = c.effectiveCdnfuToml(),
-                        onTextChange = { onChange(draft.copy(config = c.copy(cdnfuToml = it))) },
-                        placeholder = "url = \"https://…\"",
-                        highlight = TomlSyntaxHighlightTransformation,
-                        format = { null },
-                        modifier = editorModifier
-                    )
                     else -> CodeEditor(
                         text = c.xrayConfigJson,
                         onTextChange = { onChange(draft.copy(config = c.copy(xrayConfigJson = it))) },
@@ -258,6 +250,8 @@ fun ProfileEditorScreen(
                                 onForm = { onChange(draft.copy(xrayForm = it)) },
                                 openMenu = openMenu
                             )
+                        } else if (c.protocol == Config.TunnelProtocol.TURNFU) {
+                            TurnfuEditor(c = c, onChange = { onChange(draft.copy(config = it)) })
                         } else {
                             SlipstreamEditor(
                                 c = c,
@@ -351,6 +345,22 @@ private fun NumberRow(title: String, value: Int, onValue: (Int) -> Unit) {
             modifier = Modifier.width(EditorInlineFieldWidth),
             number = true
         )
+    }
+}
+
+@Composable
+private fun TurnfuEditor(c: Config, onChange: (Config) -> Unit) {
+    SettingsGroup(t(S.TURNFU_SERVER), Icons.Rounded.Dns) {
+        TextRow(t(S.FIELD_ADDRESS), c.turnfuHost) { onChange(c.copy(turnfuHost = it.trim())) }
+        SettingsDivider()
+        NumberRow(t(S.FIELD_PORT), c.turnfuPort) { onChange(c.copy(turnfuPort = it)) }
+        SettingsDivider()
+        TextRow(t(S.PASSWORD), c.turnfuPassword, password = true) { onChange(c.copy(turnfuPassword = it.trim())) }
+    }
+    SettingsGroup(t(S.EDITOR_SECTION_ADVANCED), Icons.Rounded.Tune) {
+        NumberRow(t(S.TURNFU_WORKERS), c.turnfuWorkers) { onChange(c.copy(turnfuWorkers = it)) }
+        SettingsDivider()
+        NumberRow(t(S.TURNFU_MTU), c.turnfuMtu) { onChange(c.copy(turnfuMtu = it)) }
     }
 }
 

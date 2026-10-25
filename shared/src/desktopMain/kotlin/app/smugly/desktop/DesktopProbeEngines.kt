@@ -22,8 +22,8 @@ class DesktopProbeEngines(
     override fun supports(protocol: Config.TunnelProtocol): Boolean = when (protocol) {
         Config.TunnelProtocol.XRAY -> EngineBinaries.find("xray") != null
         Config.TunnelProtocol.S3FU -> EngineBinaries.find("s3fu") != null
-        Config.TunnelProtocol.CDNFU -> EngineBinaries.find("cdnfu") != null
         Config.TunnelProtocol.SLIPSTREAM -> EngineBinaries.findSlipstream() != null
+        Config.TunnelProtocol.TURNFU -> false
     }
 
     // A child process has to be spawned and has to bind its listener; xray is quick, the tunnels
@@ -74,18 +74,13 @@ class DesktopProbeEngines(
             file.writeText(DesktopEngineConfigs.s3fu(config, socksPort))
             Spec("s3fu", listOf(exe.absolutePath, "--client", "--config", file.absolutePath), exe.parentFile, file)
         }
-        Config.TunnelProtocol.CDNFU -> {
-            val exe = EngineBinaries.require("cdnfu")
-            val file = probeConfigFile("cdnfu-probe-$socksPort.toml")
-            file.writeText(DesktopEngineConfigs.cdnfu(config, socksPort))
-            Spec("cdnfu", listOf(exe.absolutePath, "--config", file.absolutePath), exe.parentFile, file)
-        }
         Config.TunnelProtocol.SLIPSTREAM -> {
             val exe = EngineBinaries.requireSlipstream()
             val file = probeConfigFile("slipstream-probe-$socksPort.json")
             file.writeText(DesktopEngineConfigs.slipstream(config, socksPort, resolverPool()))
             Spec("slipstream", listOf(exe.absolutePath, "--config", file.absolutePath), exe.parentFile, file)
         }
+        Config.TunnelProtocol.TURNFU -> error("turnfu is not available on desktop")
     }
 
     /** Named after the port so two probes at once cannot overwrite each other's config. */

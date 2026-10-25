@@ -10,6 +10,7 @@ import android.content.pm.ApplicationInfo
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.net.VpnService
+import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.widget.Toast
@@ -20,10 +21,10 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
 import androidx.core.graphics.drawable.toBitmap
-import app.smugly.tunnel.HevSocks5Tunnel
+import app.smugly.tunnel.RootShell
+import app.smugly.tunnel.TunnelStack
 import app.smugly.tunnel.MiniSlipstreamSocksBridge
 import app.smugly.tunnel.ResolverListConfig
-import app.smugly.tunnel.CdnfuBridge
 import app.smugly.tunnel.S3fuBridge
 import app.smugly.tunnel.SlipstreamBridge
 import app.smugly.tunnel.XrayBridge
@@ -59,6 +60,7 @@ class AndroidSmuglyPlatform(
     private val dataListeners = CopyOnWriteArrayList<() -> Unit>()
     @Volatile private var proxyStarted = false
     @Volatile private var connecting = false
+    @Volatile private var connectStartedAt = 0L
     @Volatile private var stopping = false
     private var importCallback: ((String?) -> Unit)? = null
 
@@ -75,6 +77,16 @@ class AndroidSmuglyPlatform(
             activity.contentResolver.openInputStream(uri)?.bufferedReader()?.use { it.readText() }
         }.getOrNull()
         cb?.invoke(text)
+    }
+
+    private val notificationPermissionLauncher = activity.registerForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) {}
+
+    private fun ensureNotificationPermission() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return
+        if (activity.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED) return
+        runCatching { notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS) }
     }
 
     private val vpnLauncher = activity.registerForActivityResult(
@@ -137,10 +149,16 @@ class AndroidSmuglyPlatform(
 
     override fun loadGlobalSettings(): GlobalSettings = ConfigStore.loadGlobalSettings(activity)
     override fun saveGlobalSettings(settings: GlobalSettings) {
+        val wasNotifying = ConfigStore.loadGlobalSettings(activity).trafficNotification
         ConfigStore.saveGlobalSettings(activity, settings)
+        if (settings.trafficNotification && !wasNotifying) ensureNotificationPermission()
         AppLog.setFileLoggingEnabled(activity, settings.fileLogging)
         Strings.set(settings.language)
     }
+
+    override fun loadTurnfuCallLink(): String = ConfigStore.turnfuCallLink(activity)
+
+    override fun saveTurnfuCallLink(link: String) = ConfigStore.saveTurnfuCallLink(activity, link)
 
     override fun toggleConnect() {
         if (isRunning() || connecting || stopping) {
@@ -155,10 +173,18 @@ class AndroidSmuglyPlatform(
         if (isRunning() || connecting || stopping) return
         val c = ConfigStore.effectiveConfig(activity)
         ConfigStore.save(activity, c)
+        if (ConfigStore.loadGlobalSettings(activity).trafficNotification) ensureNotificationPermission()
         connecting = true
+        connectStartedAt = android.os.SystemClock.elapsedRealtime()
         publish()
         if (c.needsVpnService()) {
-            val prep = VpnService.prepare(activity)
+            val prep = if (ConfigStore.loadGlobalSettings(activity).rootMode.isActive &&
+                c.protocol != Config.TunnelProtocol.TURNFU
+            ) {
+                null
+            } else {
+                VpnService.prepare(activity)
+            }
             if (prep != null) {
                 vpnLauncher.launch(prep)
             } else {
@@ -306,9 +332,9 @@ class AndroidSmuglyPlatform(
         proxyStarted ||
             runCatching { SlipstreamBridge.isRunning() }.getOrDefault(false) ||
             runCatching { S3fuBridge.isRunning() }.getOrDefault(false) ||
-            runCatching { CdnfuBridge.isRunning() }.getOrDefault(false) ||
             runCatching { XrayBridge.isRunning() }.getOrDefault(false) ||
-            HevSocks5Tunnel.isRunning()
+            app.smugly.tunnel.TurnfuProcess.isTunnelUp() ||
+            TunnelStack.isRunning()
 
     override fun observeConnect(onChange: (ConnectUiState) -> Unit): () -> Unit {
         listeners += onChange
@@ -324,6 +350,7 @@ class AndroidSmuglyPlatform(
     private fun snapshot(): ConnectUiState {
         val running = isRunning()
         if (running) connecting = false
+        if (connecting && TinyVpnService.lastFailureAt > connectStartedAt) connecting = false
         val progress = ResolverSelector.lastProgress
         val loading = connecting || progress.active || stopping
         val status = when {
@@ -337,10 +364,19 @@ class AndroidSmuglyPlatform(
             running -> t(S.STATUS_CONNECTED)
             else -> t(S.STATUS_NOT_CONNECTED)
         }
-        val hev = HevSocks5Tunnel.stats()
+        val hev = TunnelStack.stats()
         val bridge = MiniSlipstreamSocksBridge.stats()
-        val rx = if (HevSocks5Tunnel.isRunning()) hev.rxBytes else bridge.rxBytes
-        val tx = if (HevSocks5Tunnel.isRunning()) hev.txBytes else bridge.txBytes
+        val turnfu = app.smugly.tunnel.TurnfuProcess.isTunnelUp()
+        val rx = when {
+            turnfu -> app.smugly.tunnel.TurnfuProcess.bytesDown
+            TunnelStack.isRunning() -> hev.rxBytes
+            else -> bridge.rxBytes
+        }
+        val tx = when {
+            turnfu -> app.smugly.tunnel.TurnfuProcess.bytesUp
+            TunnelStack.isRunning() -> hev.txBytes
+            else -> bridge.txBytes
+        }
         // Current speed, not just the running totals: a number that is moving is the quickest
         // way to see the tunnel is alive. Sampled over at least half a second so it does not
         // jitter with the poll interval, and held between samples rather than dropping to zero.
@@ -413,7 +449,7 @@ class AndroidSmuglyPlatform(
         val b64 = Base64.getUrlEncoder().withoutPadding().encodeToString(compact.toByteArray())
         val scheme = when (profile.config.protocol) {
             Config.TunnelProtocol.S3FU -> "s3fu"
-            Config.TunnelProtocol.CDNFU -> "cdnfu"
+            Config.TunnelProtocol.TURNFU -> "turnfu"
             Config.TunnelProtocol.XRAY -> "xray"
             else -> "slipstream"
         }
@@ -612,11 +648,17 @@ class AndroidSmuglyPlatform(
      */
     private fun fetchRoutes(): List<app.smugly.subscription.SubscriptionFetcher.ProxySpec?> =
         buildList {
-            val port = ConfigStore.loadGlobalSettings(activity).listenPort
+            val global = ConfigStore.loadGlobalSettings(activity)
             val local = app.smugly.subscription.SubscriptionFetcher.ProxySpec(
-                "127.0.0.1", port, socks = true
+                "127.0.0.1",
+                global.listenPort,
+                socks = true,
+                username = global.localSocksUsername.takeIf { global.localSocksAuthEnabled },
+                password = global.localSocksPassword.takeIf { global.localSocksAuthEnabled }
             )
-            if (isRunning()) {
+            if (app.smugly.tunnel.TurnfuProcess.isTunnelUp()) {
+                add(null)
+            } else if (isRunning()) {
                 // Tunnel up: it is the more likely winner, but a direct attempt still follows
                 // in case the host is only served to local addresses.
                 add(local)
@@ -634,6 +676,15 @@ class AndroidSmuglyPlatform(
     override fun supportsTunTuning(): Boolean = true
 
     override fun supportsAutoConnectOnBoot(): Boolean = true
+
+    override fun supportsRootMode(): Boolean = true
+
+    override fun requestRootAccess(onResult: (Boolean) -> Unit) {
+        Thread({
+            val granted = RootShell.available(force = true)
+            handler.post { onResult(granted) }
+        }, "root-access-probe").start()
+    }
 
     override fun defaultConnectionMode(): Config.Mode = Config.Mode.VPN
 
@@ -757,6 +808,16 @@ class AndroidSmuglyPlatform(
         // "does this work, and how does it feel" instead of "does the server's port answer". The
         // probe pool bounds how many tunnels "measure the whole folder" starts at once; the
         // callback arrives on a probe thread and the UI hops it back itself.
+        if (profile.config.protocol == Config.TunnelProtocol.TURNFU) {
+            Thread({
+                val result = app.smugly.tunnel.TurnfuProbe.measure(activity, profile.config)
+                result
+                    .onSuccess { AppLog.i("LatencyProbe", "${profile.name}: ${it}ms") }
+                    .onFailure { AppLog.w("LatencyProbe", "${profile.name}: ${it.message ?: it::class.java.simpleName}") }
+                onResult(result)
+            }, "turnfu-latency").start()
+            return
+        }
         app.smugly.net.E2ELatencyProbe.submit(profile.config, probeEngines) { result ->
             result
                 .onSuccess { AppLog.i("LatencyProbe", "${profile.name}: ${it}ms") }
@@ -779,6 +840,17 @@ class AndroidSmuglyPlatform(
     override fun observeAccountWake(onWake: () -> Unit): () -> Unit {
         accountWakeListeners.add(onWake)
         return { accountWakeListeners.remove(onWake) }
+    }
+
+    private val paymentReturnListeners = CopyOnWriteArrayList<() -> Unit>()
+
+    fun notifyPaymentReturn() {
+        handler.post { paymentReturnListeners.forEach { it() } }
+    }
+
+    override fun observePaymentReturn(onPaid: () -> Unit): () -> Unit {
+        paymentReturnListeners.add(onPaid)
+        return { paymentReturnListeners.remove(onPaid) }
     }
 
     private val accountService by lazy {
@@ -837,8 +909,9 @@ class AndroidSmuglyPlatform(
 
     override fun openWebCabinet(url: String, externalLoginUrl: String?) {
         CabinetActivity.onWake = { notifyAccountWake() }
+        CabinetActivity.onPaid = { notifyPaymentReturn() }
         CabinetActivity.upstream = {
-            if (isRunning()) {
+            if (isRunning() && !app.smugly.tunnel.TurnfuProcess.isTunnelUp()) {
                 val global = ConfigStore.loadGlobalSettings(activity)
                 app.smugly.net.LocalConnectProxy.Upstream.Socks(
                     port = global.listenPort,

@@ -63,7 +63,6 @@ object TunConfig {
         "slipstream.exe",
         "slipstream-client.exe",
         "s3fu.exe",
-        "cdnfu.exe",
         "xray.exe"
     )
 

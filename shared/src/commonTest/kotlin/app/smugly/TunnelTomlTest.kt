@@ -61,41 +61,6 @@ class TunnelTomlTest {
      * phone it left GET/query defaults that fight cookie stealth. Migrating a profile must
      * not quietly change its behaviour on the wire.
      */
-    @Test
-    fun cdnfu_auto_knobs_are_coerced_to_the_phone_proven_shape() {
-        val c = base().copy(
-            protocol = Config.TunnelProtocol.CDNFU,
-            cdnfuUrl = "http://192.0.2.1/",
-            cdnfuHost = "cdn.example.com",
-            cdnfuPsk = "secret",
-            cdnfuUplinkMethod = "auto",
-            cdnfuUplinkPath = "",
-            cdnfuUplinkData = "AUTO",
-            cdnfuXhttpPlacement = "auto",
-            cdnfuDownlinkMode = "auto"
-        )
-        val toml = c.effectiveCdnfuToml()
-        for (want in listOf(
-            "method = \"POST\"",
-            "path   = \"api\"",
-            "data   = \"body\"",
-            "session_placement = \"cookie\"",
-            "mode = \"stream\"",
-            "url  = \"http://192.0.2.1/\"",
-            "host = \"cdn.example.com\"",
-            // h1 makes buffering edges hold the whole streaming downlink.
-            "http1_only = false"
-        )) {
-            assertTrue(toml.contains(want), "missing $want in:\n$toml")
-        }
-    }
-
-    @Test
-    fun cdnfu_multipath_zero_becomes_one_path() {
-        val c = base().copy(cdnfuUrl = "https://e.example", cdnfuMultipath = 0)
-        assertTrue(c.effectiveCdnfuToml().contains("paths = 1"))
-    }
-
     /** Values with quotes must not break out of the string and corrupt the config. */
     @Test
     fun values_are_escaped() {

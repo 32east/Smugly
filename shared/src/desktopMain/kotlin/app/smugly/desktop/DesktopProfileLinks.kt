@@ -12,7 +12,7 @@ import org.json.JSONObject
  * Desktop import of the panel's own `scheme://import?…` links.
  *
  * Android already understands both the exported `config=<base64 JSON>` form and the
- * query-param form the bot actually mints (`s3fu://…?endpoint=&psk=`, `cdnfu://…?url=&psk=`,
+ * query-param form the bot actually mints (`s3fu://…?endpoint=&psk=`,
  * `slipstream://…?domain=`). Desktop used to accept only the blob, so a category that held
  * nothing but those links imported as empty and was then hidden.
  */
@@ -21,7 +21,12 @@ object DesktopProfileLinks {
     fun parse(uri: String, preferredName: String = "", base: Config = defaultConfig()): ConfigProfile? {
         val trimmed = uri.trim()
         val scheme = trimmed.substringBefore("://", "").lowercase()
-        if (scheme !in setOf("slipstream", "s3fu", "cdnfu", "xray")) return null
+        if (scheme == "turnfu2") {
+            val link = app.smugly.TurnfuLink.parse(trimmed) ?: return null
+            val config = app.smugly.TurnfuLink.applyTo(base, link)
+            return ConfigProfile(id = "", name = preferredName.ifBlank { link.name ?: config.turnfuHost }, config = config)
+        }
+        if (scheme !in setOf("slipstream", "s3fu", "xray")) return null
         val params = queryParams(trimmed)
         if (params.isEmpty() && !trimmed.contains('?')) return null
 
@@ -29,7 +34,6 @@ object DesktopProfileLinks {
 
         val imported = when (scheme) {
             "s3fu" -> parseS3fu(params, base)
-            "cdnfu" -> parseCdnfu(params, base)
             "slipstream" -> parseSlipstream(params, trimmed, base)
             else -> null
         } ?: return null
@@ -54,13 +58,11 @@ object DesktopProfileLinks {
                 json.has("domain") || json.has("resolverHost") ||
                     json.has("s3Endpoint") || json.has("protocol") ||
                     json.has("s3Bucket") || json.has("s3Psk") ||
-                    json.has("cdnfuUrl") || json.has("cdnfuPsk") ||
                     json.has("xrayConfigJson") -> ConfigJson.configFromJson(json)
                 else -> null
             } ?: return@runCatching null
             val forced = when (scheme) {
                 "s3fu" -> config.copy(protocol = Config.TunnelProtocol.S3FU)
-                "cdnfu" -> config.copy(protocol = Config.TunnelProtocol.CDNFU)
                 "xray" -> config.copy(protocol = Config.TunnelProtocol.XRAY)
                 else -> config.copy(protocol = Config.TunnelProtocol.SLIPSTREAM)
             }
@@ -94,39 +96,6 @@ object DesktopProfileLinks {
         val name = first("name", "profilename")
             ?: first("login", "user")
             ?: config.s3Bucket.takeIf { it.isNotBlank() }
-            ?: fallbackName(config)
-        return name to config
-    }
-
-    private fun parseCdnfu(params: Map<String, String>, base: Config): Pair<String, Config>? {
-        fun first(vararg keys: String): String? =
-            keys.firstNotNullOfOrNull { params[it]?.takeIf { v -> v.isNotBlank() } }
-        val url = first("url", "cdnfuurl", "cdn_url", "endpoint", "host")
-        val psk = first("psk", "cdnfupsk", "cdn_psk", "password", "pass")
-        if (url.isNullOrBlank() && psk.isNullOrBlank()) return null
-        val config = base.copy(
-            protocol = Config.TunnelProtocol.CDNFU,
-            cdnfuUrl = url ?: base.cdnfuUrl,
-            cdnfuHost = first("hostheader", "host_header", "cdnfuhost", "sni") ?: base.cdnfuHost,
-            cdnfuPsk = psk ?: base.cdnfuPsk,
-            cdnfuMimic = first("mimic", "path_mimic") ?: base.cdnfuMimic.ifBlank { "mixed" },
-            cdnfuUplinkMethod = first("method", "uplink_method") ?: base.cdnfuUplinkMethod.ifBlank { "POST" },
-            cdnfuUplinkPath = first("uplink_path", "path") ?: base.cdnfuUplinkPath.ifBlank { "api" },
-            cdnfuUplinkData = first("uplink_data", "data") ?: base.cdnfuUplinkData.ifBlank { "body" },
-            cdnfuXhttpPlacement = first("xhttp", "placement", "xhttp_placement")
-                ?: base.cdnfuXhttpPlacement.ifBlank { "cookie" },
-            cdnfuDownlinkMode = first("downlink", "dl", "downlink_mode")
-                ?: base.cdnfuDownlinkMode.ifBlank { "stream" },
-            cdnfuMultipath = first("multipath", "mp", "paths")?.toIntOrNull()?.coerceIn(0, 32)
-                ?: base.cdnfuMultipath,
-            cdnfuToml = decodeToml(params["toml"])
-        )
-        val name = first("name", "profilename")
-            ?: runCatching {
-                java.net.URI(
-                    if (config.cdnfuUrl.contains("://")) config.cdnfuUrl else "https://${config.cdnfuUrl}"
-                ).host
-            }.getOrNull()?.takeIf { !it.isNullOrBlank() }
             ?: fallbackName(config)
         return name to config
     }
@@ -214,8 +183,8 @@ object DesktopProfileLinks {
 
     private fun fallbackName(c: Config): String = when (c.protocol) {
         Config.TunnelProtocol.S3FU -> c.s3Bucket.ifBlank { "S3" }
-        Config.TunnelProtocol.CDNFU -> c.cdnfuHost.ifBlank { "CDN" }
         Config.TunnelProtocol.XRAY -> "Xray"
         Config.TunnelProtocol.SLIPSTREAM -> c.domain.ifBlank { "Slipstream" }
+        Config.TunnelProtocol.TURNFU -> c.turnfuHost.ifBlank { "VK" }
     }
 }

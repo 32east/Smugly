@@ -19,7 +19,7 @@ import org.json.JSONObject
  * ```
  *   Windows system proxy  ->  127.0.0.1:<listenPort>      MixedProxyServer (HTTP + SOCKS5)
  *                                       |  SOCKS5
- *                             127.0.0.1:<listenPort + 1>  engine (slipstream / s3fu / cdnfu / xray)
+ *                             127.0.0.1:<listenPort + 1>  engine (slipstream / s3fu / xray)
  *                                       |
  *                                    tunnel
  * ```
@@ -236,11 +236,6 @@ object DesktopTunnel {
                 val cfg = writeS3fuConfig(config, socksPort)
                 EngineSpec("s3fu", listOf(exe.absolutePath, "--client", "--config", cfg.absolutePath), exe.parentFile)
             }
-            Config.TunnelProtocol.CDNFU -> {
-                val exe = EngineBinaries.require("cdnfu")
-                val cfg = writeCdnfuConfig(config, socksPort)
-                EngineSpec("cdnfu", listOf(exe.absolutePath, "--config", cfg.absolutePath), exe.parentFile)
-            }
             Config.TunnelProtocol.XRAY -> {
                 val exe = EngineBinaries.require("xray")
                 ensureXrayGeodata(exe.parentFile)
@@ -253,6 +248,7 @@ object DesktopTunnel {
                 val cfg = writeSlipstreamConfig(config, socksPort, settings.dnsResolverPool)
                 EngineSpec("slipstream", listOf(exe.absolutePath, "--config", cfg.absolutePath), exe.parentFile)
             }
+            Config.TunnelProtocol.TURNFU -> error("turnfu is not available on desktop yet")
         }
 
     private fun engineConfigDir(): File =
@@ -261,11 +257,6 @@ object DesktopTunnel {
     private fun writeS3fuConfig(c: Config, socksPort: Int): File =
         File(engineConfigDir(), "s3fu-client.toml").apply {
             writeText(DesktopEngineConfigs.s3fu(c, socksPort))
-        }
-
-    private fun writeCdnfuConfig(c: Config, socksPort: Int): File =
-        File(engineConfigDir(), "cdnfu-client.toml").apply {
-            writeText(DesktopEngineConfigs.cdnfu(c, socksPort))
         }
 
     private fun writeSlipstreamConfig(c: Config, socksPort: Int, resolverPoolRaw: String): File =
@@ -409,7 +400,7 @@ object EngineBinaries {
 
     /** Engines present right now — used by Diagnostics so a missing binary is obvious. */
     fun report(): String = buildString {
-        listOf("slipstream", "s3fu", "cdnfu", "xray").forEach { name ->
+        listOf("slipstream", "s3fu", "xray").forEach { name ->
             val f = if (name == "slipstream") findSlipstream() else find(name)
             appendLine(if (f != null) "$name: ${f.absolutePath}" else "$name: NOT FOUND")
         }

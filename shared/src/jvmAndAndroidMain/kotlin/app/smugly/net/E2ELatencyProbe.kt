@@ -164,7 +164,7 @@ object E2ELatencyProbe {
     }
 
     private fun opensSessionOnFirstUse(protocol: Config.TunnelProtocol): Boolean =
-        protocol == Config.TunnelProtocol.S3FU || protocol == Config.TunnelProtocol.CDNFU
+        protocol == Config.TunnelProtocol.S3FU
 
     private fun readStatusLine(input: InputStream): String {
         val line = StringBuilder(64)

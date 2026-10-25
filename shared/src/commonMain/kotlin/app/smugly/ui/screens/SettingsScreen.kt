@@ -29,6 +29,8 @@ import androidx.compose.material.icons.rounded.BugReport
 import androidx.compose.material.icons.rounded.Dns
 import androidx.compose.material.icons.rounded.KeyboardArrowDown
 import androidx.compose.material.icons.rounded.Lan
+import androidx.compose.material.icons.rounded.Lock
+import androidx.compose.material.icons.rounded.Phone
 import androidx.compose.material.icons.rounded.RestartAlt
 import androidx.compose.material.icons.rounded.Route
 import androidx.compose.material.icons.rounded.Settings
@@ -55,6 +57,7 @@ import androidx.compose.ui.unit.sp
 import app.smugly.AppLanguage
 import app.smugly.Config
 import app.smugly.GlobalSettings
+import app.smugly.RootMode
 import app.smugly.S
 import app.smugly.TunPlan
 import app.smugly.TunSettings
@@ -107,9 +110,12 @@ fun SettingsScreen(
     onSignOut: () -> Unit = {},
     showTunSettings: Boolean = false,
     showAutoConnect: Boolean = false,
+    showRootSettings: Boolean = false,
     onReset: () -> Unit = {},
     onBlockDrawerGestures: (Boolean) -> Unit = {},
     startWithAdvanced: Boolean = false,
+    turnfuCallLink: String? = null,
+    onTurnfuCallLink: (String) -> Unit = {},
     scrollState: ScrollState = rememberScrollState()
 ) {
     val languageOptions = listOf(
@@ -177,6 +183,13 @@ fun SettingsScreen(
                         }
                     }
                 }
+                if (turnfuCallLink != null) {
+                    SettingsGroup(t(S.SETTINGS_SECTION_TURNFU), Icons.Rounded.Phone) {
+                        SettingsFieldRow(t(S.TURNFU_CALL_TITLE)) {
+                            SmuglyTextField(value = turnfuCallLink, onValueChange = onTurnfuCallLink)
+                        }
+                    }
+                }
                 if (showUpdates) {
                     SettingsGroup(t(S.UPDATES_SECTION), Icons.Rounded.SystemUpdate) {
                         SettingsSwitchRow(t(S.UPDATE_AUTO), settings.autoUpdate) {
@@ -238,7 +251,7 @@ fun SettingsScreen(
                                     onChange(settings.copy(tun = settings.tun.copy(bypassLan = it)))
                                 }
                                 SettingsDivider()
-                                SettingsFieldRow(t(S.TUN_DNS), t(S.TUN_DNS_HINT)) {
+                                SettingsFieldRow(t(S.TUN_DNS)) {
                                     SmuglyTextField(
                                         value = settings.tun.dnsServers,
                                         onValueChange = { onChange(settings.copy(tun = settings.tun.copy(dnsServers = it))) },
@@ -310,6 +323,19 @@ fun SettingsScreen(
                                     singleLine = false,
                                     minLines = 5
                                 )
+                            }
+                        }
+                        if (showRootSettings) {
+                            SettingsGroup(t(S.SETTINGS_SECTION_ROOT), Icons.Rounded.Lock) {
+                                SettingsSwitchRow(t(S.ROOT_MODE), settings.rootMode.isActive) {
+                                    onChange(
+                                        settings.copy(rootMode = if (it) RootMode.TUN2SOCKS else RootMode.OFF)
+                                    )
+                                }
+                                SettingsDivider()
+                                SettingsSwitchRow(t(S.ROOT_HOTSPOT), settings.rootHotspot) {
+                                    onChange(settings.copy(rootHotspot = it))
+                                }
                             }
                         }
                         SettingsGroup(t(S.SETTINGS_SECTION_DEBUG), Icons.Rounded.BugReport) {

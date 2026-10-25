@@ -143,6 +143,7 @@ object XrayBridge {
         if (!initialized) return Result.failure(IllegalStateException("XrayBridge.init was not called"))
         stopClient() // a stale instance would hold the SOCKS port
         lastError = null
+        setDialNetwork(0L)
 
         val handler = object : libxray.CoreCallbackHandler {
             override fun startup(): Long = 0
@@ -220,6 +221,12 @@ object XrayBridge {
             runCatching { core.stopLoop() }
                 .onFailure { AppLog.w(TAG, "probe xray stop failed: ${it.message}") }
         }
+    }
+
+    fun setDialNetwork(handle: Long) {
+        if (!loaded) return
+        runCatching { libxray.Libxray.setDialNetwork(handle) }
+            .onFailure { AppLog.w(TAG, "setDialNetwork($handle) failed: ${it.message}") }
     }
 
     fun isRunning(): Boolean =

@@ -56,6 +56,9 @@ class CabinetActivity : ComponentActivity() {
         var onWake: (() -> Unit)? = null
 
         @Volatile
+        var onPaid: (() -> Unit)? = null
+
+        @Volatile
         var upstream: () -> LocalConnectProxy.Upstream = { LocalConnectProxy.Upstream.Direct }
 
         private val proxy by lazy { LocalConnectProxy { upstream() } }
@@ -243,10 +246,13 @@ class CabinetActivity : ComponentActivity() {
             val uri = request.url
             return when (uri.scheme?.lowercase()) {
                 "smugly" -> {
-                    if (uri.host.equals("external-login", ignoreCase = true)) {
-                        openExternalLogin(uri)
-                    } else {
-                        onWake?.invoke()
+                    when {
+                        uri.host.equals("external-login", ignoreCase = true) -> openExternalLogin(uri)
+                        uri.host.equals("paid", ignoreCase = true) -> {
+                            onPaid?.invoke()
+                            finish()
+                        }
+                        else -> onWake?.invoke()
                     }
                     true
                 }

@@ -20,18 +20,22 @@ import android.os.ParcelFileDescriptor
 import android.os.PowerManager
 import android.os.Process
 import android.os.SystemClock
+import android.widget.Toast
 import app.smugly.tunnel.HevSocks5Tunnel
+import app.smugly.RootRouting
+import app.smugly.tunnel.RootTunnel
+import app.smugly.tunnel.TunnelStack
 import app.smugly.tunnel.MiniSlipstreamSocksBridge
-import app.smugly.tunnel.CdnfuBridge
 import app.smugly.tunnel.S3fuBridge
+import app.smugly.tunnel.TurnfuProcess
 import app.smugly.tunnel.ResolverListConfig
 import app.smugly.tunnel.SlipstreamBridge
 import app.smugly.tunnel.XrayBridge
 import app.smugly.util.AppLog
 import app.smugly.Config
 import app.smugly.ConfigStore
+import app.smugly.GlobalSettings
 import app.smugly.PerAppFilter
-import app.smugly.effectiveCdnfuToml
 import app.smugly.effectiveS3fuToml
 import app.smugly.ComposeMainActivity
 import app.smugly.R
@@ -40,6 +44,9 @@ import app.smugly.ResolverSelector
 import app.smugly.S
 import app.smugly.TunPlan
 import app.smugly.TunSettings
+import app.smugly.TurnfuCall
+import app.smugly.TurnfuCaptchaActivity
+import app.smugly.TurnfuCaptchaHidden
 import app.smugly.XrayConfigBuilder
 import app.smugly.XrayRouting
 import app.smugly.t
@@ -55,6 +62,8 @@ class TinyVpnService : VpnService() {
     @Volatile private var stopping = false
     @Volatile private var starting = false
     @Volatile private var lifecycleGeneration = 0
+    @Volatile private var destroyed = false
+    @Volatile private var lastStartId = 0
 
     /**
      * Signalled when a stop's native cleanup has finished. A restart waits on this instead of
@@ -62,6 +71,13 @@ class TinyVpnService : VpnService() {
      */
     @Volatile private var teardownDone: java.util.concurrent.CountDownLatch? = null
     @Volatile private var resolverOptimizerRunning = false
+    @Volatile private var turnfuTunIp: String? = null
+    @Volatile private var turnfuTunIp6: String? = null
+    @Volatile private var turnfuUp = 0L
+    @Volatile private var turnfuDown = 0L
+    @Volatile private var turnfuActive = 0
+    private var turnfuDiagAt = 0L
+    private val turnfuRestarts = ArrayDeque<Long>()
     private var rxBase = 0L
     private var txBase = 0L
     private var notificationRxLast = 0L
@@ -127,6 +143,7 @@ class TinyVpnService : VpnService() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        lastStartId = startId
         when (intent?.action) {
             ACTION_STOP -> stopTunnel()
             else -> startTunnel(intent?.getBooleanExtra(EXTRA_FOREGROUND, false) == true)
@@ -135,6 +152,7 @@ class TinyVpnService : VpnService() {
     }
 
     override fun onDestroy() {
+        destroyed = true
         stopTunnel()
         super.onDestroy()
     }
@@ -160,6 +178,10 @@ class TinyVpnService : VpnService() {
                 // then dies, and only killing the process clears it. So: wait first, bump after.
                 if (pendingTeardown != null && !pendingTeardown.await(TEARDOWN_WAIT_MS, java.util.concurrent.TimeUnit.MILLISECONDS)) {
                     AppLog.w(TAG, "previous teardown still running after ${TEARDOWN_WAIT_MS}ms; starting anyway")
+                }
+                if (destroyed) {
+                    AppLog.w(TAG, "VPN start dropped: service instance was destroyed")
+                    return@Thread
                 }
                 generation = ++lifecycleGeneration
                 stopping = false
@@ -198,18 +220,18 @@ class TinyVpnService : VpnService() {
     }
 
     private fun startTunnelWorker(generation: Int) {
-        reclaimVpnConsent()
+        if (!ConfigStore.loadGlobalSettings(this).rootMode.isActive) reclaimVpnConsent()
         val rawConfig = ConfigStore.effectiveConfig(this)
         if (rawConfig.protocol == Config.TunnelProtocol.S3FU) {
             startS3fuTunnelWorker(generation, rawConfig)
             return
         }
-        if (rawConfig.protocol == Config.TunnelProtocol.CDNFU) {
-            startCdnfuTunnelWorker(generation, rawConfig)
-            return
-        }
         if (rawConfig.protocol == Config.TunnelProtocol.XRAY) {
             startXrayTunnelWorker(generation, rawConfig)
+            return
+        }
+        if (rawConfig.protocol == Config.TunnelProtocol.TURNFU) {
+            startTurnfuTunnelWorker(generation, rawConfig)
             return
         }
         val config = normalizeAutoConfig(rawConfig)
@@ -221,8 +243,7 @@ class TinyVpnService : VpnService() {
             if (config.resolverMode == Config.ResolverMode.MANUAL) {
                 require(config.resolverHost.isNotBlank()) { "resolver is empty" }
             }
-            SlipstreamBridge.setVpnService(this)
-            SlipstreamBridge.proxyOnlyMode = false
+            bindSocketProtector()
             SlipstreamBridge.dnsQueryType = config.dnsQueryType
             SlipstreamBridge.dnsLabelLength = config.dnsLabelLength
             SlipstreamBridge.dnsLabelLengthJitter = config.dnsLabelLengthJitter
@@ -280,17 +301,16 @@ class TinyVpnService : VpnService() {
             ).getOrThrow()
             if (!tunnelActive || lifecycleGeneration != generation) error("VPN start cancelled")
 
-            val tun = ConfigStore.loadGlobalSettings(this).tun
-            tunFd = establishTun(tun, TunPlan.dnsServers(tun.dnsServers))
-
-            HevSocks5Tunnel.start(
-                tunFd = tunFd ?: error("TUN fd is null"),
-                socksAddress = "127.0.0.1",
+            val global = ConfigStore.loadGlobalSettings(this)
+            bringUpTun(
+                global = global,
+                dnsServers = TunPlan.dnsServers(global.tun.dnsServers),
                 socksPort = bridgePort,
                 username = localSocks.first,
                 password = localSocks.second,
-                mtu = TunPlan.mtu(tun)
-            ).getOrThrow()
+                udpMode = "tcp",
+                mapDns = false
+            )
             if (!tunnelActive || lifecycleGeneration != generation) error("VPN start cancelled")
             maybeUpdateTrafficNotification(0, 0, force = true)
             AppLog.i(
@@ -307,7 +327,8 @@ class TinyVpnService : VpnService() {
             registerNetworkChangeWatch()
         } catch (e: Throwable) {
             AppLog.e(TAG, "VPN start failed", e)
-            runCatching { HevSocks5Tunnel.stop() }
+            lastFailureAt = SystemClock.elapsedRealtime()
+            runCatching { TunnelStack.stop(this) }
             runCatching { MiniSlipstreamSocksBridge.stop() }
             runCatching { SlipstreamBridge.stopClient() }
             runCatching { tunFd?.close() }
@@ -341,13 +362,16 @@ class TinyVpnService : VpnService() {
             resetTrafficBase()
 
             val socksPort = config.listenPort
+            val localSocks = localSocksCredentials()
             val caPath = ensureCaBundle()
             // The profile carries the whole config file; a profile from an older build
             // has none, and effectiveS3fuToml() derives one from its fields.
             S3fuBridge.startClient(
                 configToml = config.effectiveS3fuToml(),
                 socksListen = "${proxyListenHost()}:$socksPort",
-                caFile = caPath
+                caFile = caPath,
+                username = localSocks.first,
+                password = localSocks.second
             ).getOrThrow()
             if (!tunnelActive || lifecycleGeneration != generation) error("VPN start cancelled")
 
@@ -358,24 +382,19 @@ class TinyVpnService : VpnService() {
             }
             if (!tunnelActive || lifecycleGeneration != generation) error("VPN start cancelled")
 
-            // Same as CDNFU: raw DNS UDP to 1.1.1.1 through S3 is lossy (Telegram
+            // Raw DNS UDP to 1.1.1.1 through S3 is lossy (Telegram
             // has IPs cached, browsers do not) so the tab never resolves.
-            val tun = ConfigStore.loadGlobalSettings(this).tun
-            tunFd = establishTun(tun, listOf(HevSocks5Tunnel.MAPDNS_ADDRESS))
-
             // s3fu implements standard SOCKS5 UDP ASSOCIATE (no auth) -> hev udp='udp'.
             // mapdns restores hostnames on CONNECT; QUIC is rejected in hev.
-            HevSocks5Tunnel.start(
-                tunFd = tunFd ?: error("TUN fd is null"),
-                socksAddress = "127.0.0.1",
+            bringUpTun(
+                global = ConfigStore.loadGlobalSettings(this),
+                dnsServers = listOf(HevSocks5Tunnel.MAPDNS_ADDRESS),
                 socksPort = socksPort,
-                username = null,
-                password = null,
+                username = localSocks.first,
+                password = localSocks.second,
                 udpMode = "udp",
-                mapDns = true,
-                rejectNonDnsUdp = false,
-                mtu = TunPlan.mtu(tun)
-            ).getOrThrow()
+                mapDns = true
+            )
             if (!tunnelActive || lifecycleGeneration != generation) error("VPN start cancelled")
 
             maybeUpdateTrafficNotification(0, 0, force = true)
@@ -384,7 +403,8 @@ class TinyVpnService : VpnService() {
             handler.post(diagnostics)
         } catch (e: Throwable) {
             AppLog.e(TAG, "S3FU VPN start failed", e)
-            runCatching { HevSocks5Tunnel.stop() }
+            lastFailureAt = SystemClock.elapsedRealtime()
+            runCatching { TunnelStack.stop(this) }
             runCatching { S3fuBridge.stopClient() }
             runCatching { tunFd?.close() }
             tunFd = null
@@ -393,86 +413,6 @@ class TinyVpnService : VpnService() {
         }
     }
 
-    /**
-     * CDNFU protocol path: native cdn-fuckup XHTTP packet-up client as local SOCKS5,
-     * then hev-socks5-tunnel on top — same shape as S3FU. TLS to the CDN edge leaves
-     * the device outside the TUN via [applyAppFilter], which always excludes our own package.
-     */
-    private fun startCdnfuTunnelWorker(generation: Int, config: Config) {
-        currentConfig = config
-        tunnelActive = true
-        AppLog.i(
-            TAG,
-            "CDNFU start url=${config.cdnfuUrl} host=${config.cdnfuHost} mimic=${config.cdnfuMimic} " +
-                "method=${config.cdnfuUplinkMethod} path=${config.cdnfuUplinkPath} " +
-                "data=${config.cdnfuUplinkData} xhttp=${config.cdnfuXhttpPlacement} " +
-                "dl=${config.cdnfuDownlinkMode} mp=${config.cdnfuMultipath}"
-        )
-        try {
-            require(config.cdnfuUrl.isNotBlank()) { "URL is empty" }
-            require(config.cdnfuPsk.isNotBlank()) { "PSK is empty" }
-            require(CdnfuBridge.isLoaded()) { "libcdnfu failed to load" }
-            resetTrafficBase()
-
-            // The per-knob plumbing that used to live here moved into the config itself:
-            // the profile now carries the whole cdnfu TOML and the engine parses it, so
-            // there is nothing left to translate. TunnelToml keeps the phone-proven shape
-            // ("auto" coerced to POST/api/body/cookie/stream) when it has to derive a
-            // config from an older profile's fields.
-            val socksPort = config.listenPort
-            CdnfuBridge.startClient(
-                configToml = config.effectiveCdnfuToml(),
-                socksListen = "${proxyListenHost()}:$socksPort"
-            ).getOrThrow()
-            if (!tunnelActive || lifecycleGeneration != generation) error("VPN start cancelled")
-
-            if (!waitForLocalPort(socksPort, CDNFU_SOCKS_READY_TIMEOUT_MS) { CdnfuBridge.isRunning() }) {
-                error(
-                    CdnfuBridge.lastError()
-                        ?: "cdnfu SOCKS proxy did not come up on 127.0.0.1:$socksPort"
-                )
-            }
-            if (!tunnelActive || lifecycleGeneration != generation) error("VPN start cancelled")
-
-            // mapdns answers here; apps must NOT use 1.1.1.1 (each DNS query was a full
-            // XHTTP UDP session and made the tunnel unusable).
-            val tun = ConfigStore.loadGlobalSettings(this).tun
-            tunFd = establishTun(tun, listOf(HevSocks5Tunnel.MAPDNS_ADDRESS))
-
-            // mapdns: hostname restored on SOCKS CONNECT, so DNS never rides as UDP.
-            //
-            // rejectNonDnsUdp stays OFF: it dropped *every* non-DNS datagram, which meant a
-            // game's UDP never reached the tunnel at all — Brawl Stars fell back to TCP and
-            // moved in jerks. The two things it was guarding against are already covered:
-            // DNS by mapdns above, and QUIC by hev's own rejectQuic (always on), so browsers
-            // still fall back to TCP instead of opening dozens of packet-up UDP sessions.
-            HevSocks5Tunnel.start(
-                tunFd = tunFd ?: error("TUN fd is null"),
-                socksAddress = "127.0.0.1",
-                socksPort = socksPort,
-                username = null,
-                password = null,
-                udpMode = "udp",
-                mapDns = true,
-                rejectNonDnsUdp = false,
-                mtu = TunPlan.mtu(tun)
-            ).getOrThrow()
-            if (!tunnelActive || lifecycleGeneration != generation) error("VPN start cancelled")
-
-            maybeUpdateTrafficNotification(0, 0, force = true)
-            AppLog.i(TAG, "CDNFU VPN connected socks=127.0.0.1:$socksPort")
-            handler.removeCallbacks(diagnostics)
-            handler.post(diagnostics)
-        } catch (e: Throwable) {
-            AppLog.e(TAG, "CDNFU VPN start failed", e)
-            runCatching { HevSocks5Tunnel.stop() }
-            runCatching { CdnfuBridge.stopClient() }
-            runCatching { tunFd?.close() }
-            tunFd = null
-            tunnelActive = false
-            stopTunnel()
-        }
-    }
 
     /**
      * XRAY protocol path: the profile is a literal Xray JSON config. Start the
@@ -501,14 +441,21 @@ class TinyVpnService : VpnService() {
             // out (10808 SOCKS / 10809 HTTP). Only added when it is actually going to be
             // advertised — an inbound nobody dials is just an open port.
             val global = ConfigStore.loadGlobalSettings(this)
-            val appProxy = global.appHttpProxy &&
+            val appProxy = global.appHttpProxy && !global.rootMode.isActive &&
                 Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q
             val listen = XrayConfigBuilder.listenAddress(global.allowLan)
             // A config that already publishes an HTTP inbound keeps its own port — that one is
             // the user's decision and may be written down elsewhere. Only a config without one
             // gets ours, one above the SOCKS port the way every other client lays it out.
             val httpPort = XrayConfigBuilder.httpPortOf(config.xrayConfigJson) ?: (socksPort + 1)
-            val configJson = XrayConfigBuilder.withSocksPort(config.xrayConfigJson, socksPort, listen)
+            val localSocks = localSocksCredentials()
+            val configJson = XrayConfigBuilder.withSocksPort(
+                config.xrayConfigJson,
+                socksPort,
+                listen,
+                localSocks.first,
+                localSocks.second
+            )
                 .let { if (appProxy) XrayConfigBuilder.withHttpPort(it, httpPort, listen) else it }
                 .let { XrayRouting.apply(it, global.routing) }
             AppLog.i(
@@ -531,7 +478,15 @@ class TinyVpnService : VpnService() {
             }
             if (!tunnelActive || lifecycleGeneration != generation) error("VPN start cancelled")
 
-            tunFd = establishTun(global.tun, TunPlan.dnsServers(global.tun.dnsServers)) { builder ->
+            bringUpTun(
+                global = global,
+                dnsServers = TunPlan.dnsServers(global.tun.dnsServers),
+                socksPort = socksPort,
+                username = localSocks.first,
+                password = localSocks.second,
+                udpMode = "udp",
+                mapDns = false
+            ) { builder ->
                 if (appProxy) {
                     // Proxy-aware apps now send `CONNECT host:port` instead of dialling an address
                     // they resolved themselves, so the host name survives all the way to the routing
@@ -544,17 +499,6 @@ class TinyVpnService : VpnService() {
                 }
             }
 
-            // The generated socks inbound sets "udp": true, i.e. real SOCKS5 UDP
-            // ASSOCIATE -> hev udp='udp' (same as s3fu, unlike the DNS tunnel).
-            HevSocks5Tunnel.start(
-                tunFd = tunFd ?: error("TUN fd is null"),
-                socksAddress = "127.0.0.1",
-                socksPort = socksPort,
-                username = null,
-                password = null,
-                udpMode = "udp",
-                mtu = TunPlan.mtu(global.tun)
-            ).getOrThrow()
             if (!tunnelActive || lifecycleGeneration != generation) error("VPN start cancelled")
 
             maybeUpdateTrafficNotification(0, 0, force = true)
@@ -563,7 +507,8 @@ class TinyVpnService : VpnService() {
             handler.post(diagnostics)
         } catch (e: Throwable) {
             AppLog.e(TAG, "XRAY VPN start failed", e)
-            runCatching { HevSocks5Tunnel.stop() }
+            lastFailureAt = SystemClock.elapsedRealtime()
+            runCatching { TunnelStack.stop(this) }
             runCatching { XrayBridge.stopClient() }
             runCatching { tunFd?.close() }
             tunFd = null
@@ -572,9 +517,299 @@ class TinyVpnService : VpnService() {
         }
     }
 
+    private fun startTurnfuTunnelWorker(generation: Int, config: Config) {
+        currentConfig = config
+        tunnelActive = true
+        val callLink = config.turnfuCalls.joinToString(",").ifBlank { if (config.turnfuToken.isEmpty()) ConfigStore.turnfuCallLink(this) else "" }
+        AppLog.i(
+            TAG,
+            "TURNFU start peer=${config.turnfuHost}:${config.turnfuPort} workers=${config.turnfuWorkers} " +
+                "mtu=${config.turnfuMtu} call=${TurnfuCall.hash(callLink)?.take(6) ?: "none"}"
+        )
+        try {
+            require(config.turnfuHost.isNotBlank()) { "server is empty" }
+            require(config.turnfuPassword.isNotBlank()) { "password is empty" }
+            require(callLink.isNotBlank() || config.turnfuToken.isNotEmpty()) { "VK call link is empty" }
+            require(TurnfuProcess.isAvailable(this)) { "turnfu engine is missing" }
+            resetTrafficBase()
+            turnfuTunIp = null
+            turnfuTunIp6 = null
+            turnfuUp = 0
+            turnfuDown = 0
+            turnfuActive = 0
+            turnfuDiagAt = 0
+            synchronized(turnfuRestarts) { turnfuRestarts.clear() }
+            val configured = java.util.concurrent.CountDownLatch(1)
+            val first = java.util.concurrent.atomic.AtomicReference<TurnfuProcess.TunConfig?>(null)
+            startTurnfuEngine(generation, config, callLink) { cfg ->
+                if (first.compareAndSet(null, cfg)) {
+                    configured.countDown()
+                    true
+                } else {
+                    false
+                }
+            }.getOrThrow()
+            val deadline = SystemClock.elapsedRealtime() + TURNFU_CONFIG_TIMEOUT_MS
+            while (!configured.await(250, java.util.concurrent.TimeUnit.MILLISECONDS)) {
+                if (!tunnelActive || lifecycleGeneration != generation) error("VPN start cancelled")
+                if (!TurnfuProcess.isRunning()) error(TurnfuProcess.lastError() ?: "turnfu engine exited")
+                if (SystemClock.elapsedRealtime() > deadline) error("the server sent no tunnel config")
+            }
+            if (!tunnelActive || lifecycleGeneration != generation) error("VPN start cancelled")
+            attachTurnfu(config, first.get() ?: error("no tunnel config"))
+            if (!tunnelActive || lifecycleGeneration != generation) error("VPN start cancelled")
+            maybeUpdateTrafficNotification(0, 0, force = true)
+            AppLog.i(TAG, "TURNFU VPN connected ip=$turnfuTunIp root=${RootTunnel.ownsTunnel()}")
+            handler.removeCallbacks(diagnostics)
+            handler.post(diagnostics)
+            registerNetworkChangeWatch()
+        } catch (e: Throwable) {
+            AppLog.e(TAG, "TURNFU VPN start failed", e)
+            lastFailureAt = SystemClock.elapsedRealtime()
+            runCatching { TurnfuProcess.stop() }
+            runCatching { tunFd?.close() }
+            tunFd = null
+            turnfuTunIp = null
+            turnfuTunIp6 = null
+            tunnelActive = false
+            stopTunnel()
+        }
+    }
+
+    private fun startTurnfuEngine(
+        generation: Int,
+        config: Config,
+        callLink: String,
+        onFirstConfig: (TurnfuProcess.TunConfig) -> Boolean
+    ): Result<Unit> {
+        val request = TurnfuProcess.Request(
+            host = config.turnfuHost.trim(),
+            port = config.turnfuPort.coerceIn(1, 65535),
+            password = config.turnfuPassword.trim(),
+            callLink = TurnfuCall.url(callLink) ?: callLink,
+            workers = config.turnfuWorkers.coerceIn(5, 100),
+            netHandle = TurnfuProcess.physicalNetworkHandle(this),
+            accountToken = config.turnfuToken
+        )
+        val listener = object : TurnfuProcess.Listener {
+            private fun current() = !destroyed && tunnelActive && lifecycleGeneration == generation &&
+                currentConfig?.protocol == Config.TunnelProtocol.TURNFU
+
+            override fun onConfig(config: TurnfuProcess.TunConfig) {
+                if (onFirstConfig(config) || !current()) return
+                Thread({ reattachTurnfuTun(generation, config) }, "turnfu-reattach").start()
+            }
+
+            override fun onStats(active: Int, up: Long, down: Long) {
+                turnfuActive = active
+                turnfuUp = up
+                turnfuDown = down
+            }
+
+            override fun onCaptcha(uri: String) {
+                if (current()) handler.post { showTurnfuCaptcha(uri) }
+            }
+
+            override fun onCaptchaAuto(uri: String) {
+                if (current()) TurnfuCaptchaHidden.start(this@TinyVpnService, uri) else TurnfuProcess.submitCaptcha("error:inactive")
+            }
+
+            override fun onError(code: String, message: String, fatal: Boolean) {
+                if (fatal) AppLog.w(TAG, "turnfu fatal error $code: $message")
+            }
+
+            override fun onExit(code: Int) {
+                if (!current()) return
+                AppLog.w(TAG, "turnfu engine exited code=$code while the tunnel was up")
+                restartTurnfuEngine(generation, config, callLink)
+            }
+        }
+        return TurnfuProcess.start(this, request, listener)
+    }
+
+    private fun restartTurnfuEngine(generation: Int, config: Config, callLink: String) {
+        val now = SystemClock.elapsedRealtime()
+        val allowed = synchronized(turnfuRestarts) {
+            while (turnfuRestarts.isNotEmpty() && now - turnfuRestarts.first() > TURNFU_RESTART_WINDOW_MS) {
+                turnfuRestarts.removeFirst()
+            }
+            if (turnfuRestarts.size >= TURNFU_MAX_RESTARTS) {
+                false
+            } else {
+                turnfuRestarts.addLast(now)
+                true
+            }
+        }
+        if (!allowed) {
+            AppLog.e(TAG, "turnfu engine keeps exiting; stopping the tunnel")
+            handler.post { stopTunnel() }
+            return
+        }
+        Thread({
+            Thread.sleep(TURNFU_RESTART_DELAY_MS)
+            if (destroyed || !tunnelActive || lifecycleGeneration != generation) return@Thread
+            AppLog.i(TAG, "turnfu engine restart #${synchronized(turnfuRestarts) { turnfuRestarts.size }}")
+            startTurnfuEngine(generation, config, callLink) { false }
+                .onFailure {
+                    AppLog.e(TAG, "turnfu engine restart failed", it)
+                    handler.post { stopTunnel() }
+                }
+        }, "turnfu-restart").start()
+    }
+
+    private fun reattachTurnfuTun(generation: Int, cfg: TurnfuProcess.TunConfig) {
+        if (!tunnelActive || lifecycleGeneration != generation) return
+        if (RootTunnel.ownsTunnel()) {
+            AppLog.i(TAG, "turnfu engine asked for the TUN again ip=${cfg.ip} (root)")
+            runCatching { attachTurnfu(currentConfig ?: return, cfg) }
+                .onFailure { AppLog.e(TAG, "turnfu root re-attach failed", it) }
+            return
+        }
+        val existing = tunFd
+        val sent = if (existing != null && cfg.ip == turnfuTunIp && cfg.ip6 == turnfuTunIp6) {
+            AppLog.i(TAG, "turnfu engine asked for the TUN again ip=${cfg.ip}")
+            TurnfuProcess.sendTunFd(existing)
+        } else {
+            AppLog.i(TAG, "turnfu tunnel address changed ${turnfuTunIp ?: "-"} ${turnfuTunIp6 ?: "-"} -> ${cfg.ip} ${cfg.ip6 ?: "-"}")
+            runCatching { attachTurnfuTun(currentConfig ?: return, cfg) }
+                .onFailure { AppLog.e(TAG, "turnfu TUN re-attach failed", it) }
+                .isSuccess
+        }
+        if (!sent) AppLog.w(TAG, "turnfu TUN hand-over failed after reconfig")
+    }
+
+    private fun attachTurnfu(config: Config, cfg: TurnfuProcess.TunConfig) {
+        if (ConfigStore.loadGlobalSettings(this).rootMode.isActive) attachTurnfuRoot(config, cfg) else attachTurnfuTun(config, cfg)
+    }
+
+    private fun attachTurnfuRoot(config: Config, cfg: TurnfuProcess.TunConfig) {
+        val global = ConfigStore.loadGlobalSettings(this)
+        val dns = if (global.tun.dnsServers.isBlank() && cfg.dns.isNotEmpty()) cfg.dns else TunPlan.dnsServers(global.tun.dnsServers)
+        val attach = TurnfuProcess.attachTunCommand(this, RootRouting.IFACE) ?: error("turnfu engine is not running")
+        val ip6 = cfg.ip6?.takeIf { global.tun.ipv6 }
+        val mtu = config.turnfuMtu.coerceIn(576, 1500)
+        val linkMtu = turnfuLinkMtu(mtu, ip6)
+        RootTunnel.start(
+            this,
+            RootTunnel.Request(
+                socksPort = 0,
+                username = null,
+                password = null,
+                udpMode = "udp",
+                mapDns = false,
+                tun = global.tun.copy(ipv6 = ip6 != null),
+                dnsServers = dns,
+                hotspot = global.rootHotspot,
+                perAppMode = global.perAppMode,
+                perAppPackages = global.perAppPackages,
+                attachCommand = attach,
+                tunAddressV4 = cfg.ip,
+                tunAddressV6 = ip6,
+                mtu = linkMtu,
+                routeMtuV4 = mtu.takeIf { it < linkMtu }
+            )
+        ).exceptionOrNull()?.let {
+            handler.post { Toast.makeText(this, t(S.TOAST_ROOT_START_FAILED), Toast.LENGTH_LONG).show() }
+            throw it
+        }
+        TurnfuProcess.markTunAttached()
+        turnfuTunIp = cfg.ip
+        turnfuTunIp6 = ip6
+        AppLog.i(TAG, "turnfu root tun ip=${cfg.ip} ip6=${ip6 ?: "-"} mtu=$linkMtu v4RouteMtu=$mtu")
+    }
+
+    private fun turnfuLinkMtu(mtu: Int, ip6: String?): Int =
+        if (ip6 != null) mtu.coerceAtLeast(TunSettings.MIN_MTU) else mtu
+
+    private fun attachTurnfuTun(config: Config, cfg: TurnfuProcess.TunConfig) {
+        val global = ConfigStore.loadGlobalSettings(this)
+        val dns = if (global.tun.dnsServers.isBlank() && cfg.dns.isNotEmpty()) cfg.dns else TunPlan.dnsServers(global.tun.dnsServers)
+        val previous = tunFd
+        val ip6 = cfg.ip6?.takeIf { global.tun.ipv6 }
+        val fd = establishTurnfuTun(global.tun, cfg.ip, ip6, dns, config.turnfuMtu.coerceIn(576, 1500))
+        tunFd = fd
+        turnfuTunIp = cfg.ip
+        turnfuTunIp6 = ip6
+        if (!TurnfuProcess.sendTunFd(fd)) error(TurnfuProcess.lastError() ?: "the turnfu engine did not take the TUN")
+        if (previous != null && previous !== fd) runCatching { previous.close() }
+    }
+
+    private fun establishTurnfuTun(tun: TunSettings, ip: String, ip6: String?, dnsServers: List<String>, mtu: Int): ParcelFileDescriptor {
+        val v4 = TunPlan.ipv4Routes(tun)
+        val v6 = TunPlan.ipv6Routes(tun)
+        val linkMtu = turnfuLinkMtu(mtu, ip6)
+        val builder = Builder()
+            .setSession(t(S.APP_NAME))
+            .setMtu(linkMtu)
+            .addAddress(ip, 32)
+        if (ip6 != null) builder.addAddress(ip6, 128)
+        v4.forEach { builder.addRoute(it.address, it.prefix) }
+        if (v6.isNotEmpty()) v6.forEach { builder.addRoute(it.address, it.prefix) } else builder.addRoute("::", 0)
+        var dnsAdded = 0
+        dnsServers.filter { it.contains('.') }.forEach { dns ->
+            runCatching { builder.addDnsServer(dns) }
+                .onSuccess { dnsAdded++ }
+                .onFailure { AppLog.w(TAG, "addDnsServer($dns) failed: ${it.message}") }
+        }
+        if (dnsAdded == 0) TunPlan.DEFAULT_DNS.forEach { builder.addDnsServer(it) }
+        applyAppFilter(builder, includeSelf = true)
+        if (ConfigStore.loadGlobalSettings(this).appHttpProxy && Build.VERSION.SDK_INT >= 29) {
+            runCatching {
+                builder.setHttpProxy(ProxyInfo.buildDirectProxy(TurnfuProcess.GATEWAY, TurnfuProcess.HTTP_PROXY_PORT))
+            }.onFailure { AppLog.w(TAG, "turnfu setHttpProxy failed: ${it.message}") }
+        }
+        AppLog.i(TAG, "turnfu tun ip=$ip ip6=${ip6 ?: "-"} mtu=$linkMtu v4Routes=${v4.size} v6Routes=${v6.size} dns=${dnsServers.joinToString(",")}")
+        return builder.establish() ?: error("VpnService.Builder.establish returned null")
+    }
+
+    private fun showTurnfuCaptcha(uri: String) {
+        val intent = Intent(this, TurnfuCaptchaActivity::class.java)
+            .putExtra(TurnfuCaptchaActivity.EXTRA_URI, uri)
+            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        runCatching { startActivity(intent) }.onFailure { AppLog.w(TAG, "captcha activity start failed: ${it.message}") }
+        val pi = PendingIntent.getActivity(
+            this,
+            TURNFU_CAPTCHA_NOTIFICATION_ID,
+            intent,
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+        )
+        val builder = if (Build.VERSION.SDK_INT >= 26) {
+            Notification.Builder(this, CHANNEL)
+        } else {
+            @Suppress("DEPRECATION")
+            Notification.Builder(this)
+        }
+        val notification = builder
+            .setContentTitle(t(S.TURNFU_CAPTCHA_TITLE))
+            .setContentText(t(S.TURNFU_CAPTCHA_NOTIFICATION))
+            .setSmallIcon(R.drawable.ic_stat_smugly)
+            .setContentIntent(pi)
+            .setAutoCancel(true)
+            .setTimeoutAfter(TURNFU_CAPTCHA_TIMEOUT_MS)
+            .build()
+        runCatching {
+            getSystemService(NotificationManager::class.java)?.notify(TURNFU_CAPTCHA_NOTIFICATION_ID, notification)
+        }
+    }
+
+    private fun writeTurnfuDiagnostics() {
+        maybeUpdateTrafficNotification(turnfuDown, turnfuUp)
+        val running = TurnfuProcess.isRunning()
+        val now = SystemClock.elapsedRealtime()
+        val interval = if (isScreenInteractive()) LIGHT_DIAG_ACTIVE_INTERVAL_MS else LIGHT_DIAG_SCREEN_OFF_INTERVAL_MS
+        if (turnfuDiagAt == 0L || now - turnfuDiagAt >= interval) {
+            turnfuDiagAt = now
+            AppLog.i(
+                TAG,
+                "diag[turnfu] running=$running ip=${turnfuTunIp ?: "-"} streams=$turnfuActive " +
+                    "total down=${formatBytes(turnfuDown)} up=${formatBytes(turnfuUp)}"
+            )
+        }
+    }
+
     /** Lightweight diagnostics for the XRAY path (no DNS/resolver/bridge machinery). */
     private fun writeXrayDiagnostics() {
-        val hev = HevSocks5Tunnel.stats()
+        val hev = TunnelStack.stats()
         maybeUpdateTrafficNotification(hev.rxBytes, hev.txBytes)
         val running = XrayBridge.isRunning()
         lightDiagnosticsLine("xray", running, hev)?.let { line ->
@@ -598,7 +833,7 @@ class TinyVpnService : VpnService() {
      *
      * Every protocol path calls this instead of excluding our own package by hand, which is why
      * the feature is protocol-agnostic: the filter lives on the TUN, not in any engine, so
-     * Slipstream, S3FU, CDNFU and Xray all get it from the one call. [PerAppFilter] decides
+     * Slipstream, S3FU and Xray all get it from the one call. [PerAppFilter] decides
      * which of the two mutually exclusive lists to use — mixing them makes `establish()` throw.
      *
      * Each package is added on its own: `addAllowed/DisallowedApplication` throws
@@ -640,9 +875,86 @@ class TinyVpnService : VpnService() {
         return builder.establish() ?: error("VpnService.Builder.establish returned null")
     }
 
-    private fun applyAppFilter(builder: Builder) {
+    private fun bindSocketProtector() {
+        val root = ConfigStore.loadGlobalSettings(this).rootMode.isActive
+        SlipstreamBridge.setVpnService(if (root) null else this)
+        SlipstreamBridge.proxyOnlyMode = root
+    }
+
+    private fun bringUpTun(
+        global: GlobalSettings,
+        dnsServers: List<String>,
+        socksPort: Int,
+        username: String?,
+        password: String?,
+        udpMode: String,
+        mapDns: Boolean,
+        extra: (Builder) -> Unit = {}
+    ) {
+        if (global.rootMode.isActive) {
+            val started = RootTunnel.start(
+                this,
+                RootTunnel.Request(
+                    socksPort = socksPort,
+                    username = username,
+                    password = password,
+                    udpMode = udpMode,
+                    mapDns = mapDns,
+                    tun = global.tun,
+                    dnsServers = dnsServers,
+                    hotspot = global.rootHotspot,
+                    perAppMode = global.perAppMode,
+                    perAppPackages = global.perAppPackages
+                )
+            )
+            started.exceptionOrNull()?.let {
+                handler.post { Toast.makeText(this, t(S.TOAST_ROOT_START_FAILED), Toast.LENGTH_LONG).show() }
+                throw it
+            }
+            return
+        }
+        tunFd = establishTun(global.tun, dnsServers, extra)
+        HevSocks5Tunnel.start(
+            tunFd = tunFd ?: error("TUN fd is null"),
+            socksAddress = "127.0.0.1",
+            socksPort = socksPort,
+            username = username,
+            password = password,
+            udpMode = udpMode,
+            mapDns = mapDns,
+            mtu = TunPlan.mtu(global.tun)
+        ).getOrThrow()
+        if (global.rootHotspot) shareThroughHotspot()
+    }
+
+    private fun shareThroughHotspot() {
+        val iface = systemVpnInterface()
+        if (iface == null) {
+            AppLog.w(TAG, "hotspot sharing skipped: no VPN interface found")
+            return
+        }
+        RootTunnel.startHotspotOnly(this, iface).exceptionOrNull()?.let {
+            AppLog.w(TAG, "hotspot sharing failed: ${it.message}")
+            handler.post { Toast.makeText(this, t(S.TOAST_ROOT_START_FAILED), Toast.LENGTH_LONG).show() }
+        }
+    }
+
+    private fun systemVpnInterface(): String? {
+        val cm = getSystemService(ConnectivityManager::class.java) ?: return null
+        repeat(30) {
+            @Suppress("DEPRECATION")
+            for (network in cm.allNetworks) {
+                val vpn = cm.getNetworkCapabilities(network)?.hasTransport(NetworkCapabilities.TRANSPORT_VPN) == true
+                if (vpn) cm.getLinkProperties(network)?.interfaceName?.let { return it }
+            }
+            Thread.sleep(100)
+        }
+        return null
+    }
+
+    private fun applyAppFilter(builder: Builder, includeSelf: Boolean = false) {
         val settings = ConfigStore.loadGlobalSettings(this)
-        val plan = PerAppFilter.plan(settings.perAppMode, settings.perAppPackages, packageName)
+        val plan = PerAppFilter.plan(settings.perAppMode, settings.perAppPackages, packageName, includeSelf)
         if (plan.fellBackToOff) {
             AppLog.w(
                 TAG,
@@ -708,7 +1020,7 @@ class TinyVpnService : VpnService() {
 
     /** Lightweight diagnostics for the S3FU path (no DNS/resolver/bridge machinery). */
     private fun writeS3fuDiagnostics() {
-        val hev = HevSocks5Tunnel.stats()
+        val hev = TunnelStack.stats()
         maybeUpdateTrafficNotification(hev.rxBytes, hev.txBytes)
         val running = S3fuBridge.isRunning()
         lightDiagnosticsLine("s3fu", running, hev)?.let { AppLog.i(TAG, it) }
@@ -717,16 +1029,6 @@ class TinyVpnService : VpnService() {
         }
     }
 
-    /** Lightweight diagnostics for the CDNFU path. */
-    private fun writeCdnfuDiagnostics() {
-        val hev = HevSocks5Tunnel.stats()
-        maybeUpdateTrafficNotification(hev.rxBytes, hev.txBytes)
-        val running = CdnfuBridge.isRunning()
-        lightDiagnosticsLine("cdnfu", running, hev)?.let { AppLog.i(TAG, it) }
-        if (!running && tunnelActive) {
-            AppLog.w(TAG, "cdnfu client stopped while tunnel active; lastError=${CdnfuBridge.lastError() ?: "none"}")
-        }
-    }
 
     private fun startSlipstreamWithTransportFallback(
         config: Config,
@@ -804,11 +1106,11 @@ class TinyVpnService : VpnService() {
             !starting &&
             !tunnelActive &&
             tunFd == null &&
-            !HevSocks5Tunnel.isRunning() &&
+            !TunnelStack.isRunning() &&
             !MiniSlipstreamSocksBridge.isRunning() &&
             !SlipstreamBridge.isRunning() &&
             !S3fuBridge.isRunning() &&
-            !CdnfuBridge.isRunning() &&
+            !TurnfuProcess.isRunning() &&
             !XrayBridge.isRunning()
         ) {
             AppLog.i(TAG, "VPN already stopped")
@@ -842,14 +1144,17 @@ class TinyVpnService : VpnService() {
                     // udp-read-write-timeout (~60s) -- the UI sits on "Disconnecting" for a minute
                     // when switching protocols. Killing the backend + closing the TUN first makes
                     // hev's relays fail immediately so its stop returns promptly.
+                    TunnelStack.stopRoot(this)
                     runCatching { SlipstreamBridge.stopClient() }
                         .onFailure { AppLog.w(TAG, "native stop failed: ${it.message}") }
                     runCatching { S3fuBridge.stopClient() }
                         .onFailure { AppLog.w(TAG, "s3fu stop failed: ${it.message}") }
-                    runCatching { CdnfuBridge.stopClient() }
-                        .onFailure { AppLog.w(TAG, "cdnfu stop failed: ${it.message}") }
                     runCatching { XrayBridge.stopClient() }
                         .onFailure { AppLog.w(TAG, "xray stop failed: ${it.message}") }
+                    runCatching { TurnfuProcess.stop() }
+                        .onFailure { AppLog.w(TAG, "turnfu stop failed: ${it.message}") }
+                    turnfuTunIp = null
+                    turnfuTunIp6 = null
                     runCatching { MiniSlipstreamSocksBridge.stop() }
                         .onFailure { AppLog.w(TAG, "bridge stop failed: ${it.message}") }
                     runCatching { tunFd?.close() }
@@ -867,10 +1172,10 @@ class TinyVpnService : VpnService() {
                 // below is skipped (its generation is stale), so this must not depend on it.
                 done.countDown()
                 handler.post {
-                    if (lifecycleGeneration == generation) {
+                    if (lifecycleGeneration == generation && !starting && !tunnelActive) {
                         stopping = false
                         stopForeground(STOP_FOREGROUND_REMOVE)
-                        stopSelf()
+                        stopSelfResult(lastStartId)
                     }
                 }
             }
@@ -910,25 +1215,30 @@ class TinyVpnService : VpnService() {
     }
 
     private fun writeDiagnostics() {
-        if (currentConfig?.protocol == Config.TunnelProtocol.S3FU) {
-            writeS3fuDiagnostics()
+        if (RootTunnel.ownsTunnel() && !RootTunnel.isRunning()) {
+            AppLog.e(TAG, "root tunnel stopped answering; stopping")
+            stopTunnel()
             return
         }
-        if (currentConfig?.protocol == Config.TunnelProtocol.CDNFU) {
-            writeCdnfuDiagnostics()
+        if (currentConfig?.protocol == Config.TunnelProtocol.S3FU) {
+            writeS3fuDiagnostics()
             return
         }
         if (currentConfig?.protocol == Config.TunnelProtocol.XRAY) {
             writeXrayDiagnostics()
             return
         }
+        if (currentConfig?.protocol == Config.TunnelProtocol.TURNFU) {
+            writeTurnfuDiagnostics()
+            return
+        }
         val uid = applicationInfo.uid
         val rx = (TrafficStats.getUidRxBytes(uid).takeIf { it >= 0 } ?: 0) - rxBase
         val tx = (TrafficStats.getUidTxBytes(uid).takeIf { it >= 0 } ?: 0) - txBase
-        val hev = HevSocks5Tunnel.stats()
+        val hev = TunnelStack.stats()
         val bridge = MiniSlipstreamSocksBridge.stats()
-        val notificationRx = if (HevSocks5Tunnel.isRunning()) hev.rxBytes else bridge.rxBytes
-        val notificationTx = if (HevSocks5Tunnel.isRunning()) hev.txBytes else bridge.txBytes
+        val notificationRx = if (TunnelStack.isRunning()) hev.rxBytes else bridge.rxBytes
+        val notificationTx = if (TunnelStack.isRunning()) hev.txBytes else bridge.txBytes
         maybeUpdateTrafficNotification(notificationRx, notificationTx)
         val running = SlipstreamBridge.isRunning()
         val ready = SlipstreamBridge.isReady()
@@ -1006,7 +1316,7 @@ class TinyVpnService : VpnService() {
         )
         AppLog.i(
             TAG,
-            "diag running=$running ready=$ready hevRunning=${HevSocks5Tunnel.isRunning()} " +
+            "diag running=$running ready=$ready hevRunning=${TunnelStack.isRunning()} " +
                 "port=${SlipstreamBridge.port()} appRx=$rx appTx=$tx " +
                 "tunRx=${hev.rxBytes} tunTx=${hev.txBytes} " +
                 "bridgeRx=${bridge.rxBytes} bridgeTx=${bridge.txBytes} " +
@@ -1113,7 +1423,7 @@ class TinyVpnService : VpnService() {
                 restartSlipstreamPath("native_not_ready_${downFor}ms")
             }
         }
-        if (!running && HevSocks5Tunnel.isRunning()) {
+        if (!running && TunnelStack.isRunning()) {
             AppLog.e(TAG, "tun2socks is running but Slipstream native client is down")
             runCatching { MiniSlipstreamSocksBridge.stop() }
                 .onFailure { AppLog.w(TAG, "bridge emergency stop failed after native down: ${it.message}") }
@@ -1297,7 +1607,7 @@ class TinyVpnService : VpnService() {
         }.onFailure { AppLog.w(TAG, "restart alarm scheduling failed: ${it.message}") }
         // Tear down what we cleanly can, then kill the process (this also takes the wedged native
         // thread down with it). START_STICKY relaunches the service.
-        runCatching { HevSocks5Tunnel.stop() }
+        runCatching { TunnelStack.stop(this) }
         runCatching { MiniSlipstreamSocksBridge.stop() }
         Process.killProcess(Process.myPid())
     }
@@ -1371,6 +1681,10 @@ class TinyVpnService : VpnService() {
             pendingNetworkRecheck = null
             if (!tunnelActive || recovering) return@Runnable
             val config = currentConfig ?: return@Runnable
+            if (config.protocol == Config.TunnelProtocol.TURNFU) {
+                TurnfuProcess.physicalNetworkHandle(this)?.let { TurnfuProcess.setNetwork(it) }
+                return@Runnable
+            }
             if (config.resolverMode != Config.ResolverMode.AUTO) return@Runnable
             val sig = ResolverSelector.networkSignature(this)
             if (sig.isBlank() || sig == lastNetworkSignature) return@Runnable
@@ -1539,8 +1853,7 @@ class TinyVpnService : VpnService() {
                     AppLog.w(TAG, "recovery#$recoveryId cancelled: tunnel stopped")
                     return@Thread
                 }
-                SlipstreamBridge.setVpnService(this)
-                SlipstreamBridge.proxyOnlyMode = false
+                bindSocketProtector()
                 // Do NOT reset dnsQueryType here: keep the qtype that transport/qtype validation locked
                 // in at connect (e.g. a TXT fallback on a resolver that can't forward SVCB). A network
                 // change re-runs validation via startTunnelWorker, which re-picks the qtype.
@@ -1636,8 +1949,7 @@ class TinyVpnService : VpnService() {
             )
             runCatching { MiniSlipstreamSocksBridge.stop() }
             runCatching { SlipstreamBridge.stopClient() }
-            SlipstreamBridge.setVpnService(this)
-            SlipstreamBridge.proxyOnlyMode = false
+            bindSocketProtector()
             SlipstreamBridge.startClient(
                 config.domain,
                 ResolverListConfig(choice.hosts, choice.port, isAuthoritativeResolverPath(config)),
@@ -1858,7 +2170,7 @@ class TinyVpnService : VpnService() {
         lightDiagLoggedAt = now
         lightDiagRx = hev.rxBytes
         lightDiagTx = hev.txBytes
-        return "diag[$engine] running=$running hev=${HevSocks5Tunnel.isRunning()}$rates " +
+        return "diag[$engine] running=$running hev=${TunnelStack.isRunning()}$rates " +
             "total down=${formatBytes(hev.rxBytes)} up=${formatBytes(hev.txBytes)}"
     }
 
@@ -1911,6 +2223,7 @@ class TinyVpnService : VpnService() {
     }
 
     companion object {
+        @Volatile var lastFailureAt = 0L
         const val ACTION_START = "app.smugly.START"
         const val ACTION_STOP = "app.smugly.STOP"
         const val EXTRA_FOREGROUND = "app.smugly.extra.FOREGROUND"
@@ -2022,7 +2335,12 @@ class TinyVpnService : VpnService() {
         /** How long a restart waits for the previous tunnel's native cleanup to finish. */
         private const val TEARDOWN_WAIT_MS = 10_000L
         private const val S3FU_SOCKS_READY_TIMEOUT_MS = 8_000L
-        private const val CDNFU_SOCKS_READY_TIMEOUT_MS = 12_000L
+        private const val TURNFU_CONFIG_TIMEOUT_MS = 180_000L
+        private const val TURNFU_RESTART_DELAY_MS = 3_000L
+        private const val TURNFU_RESTART_WINDOW_MS = 10 * 60_000L
+        private const val TURNFU_MAX_RESTARTS = 5
+        private const val TURNFU_CAPTCHA_TIMEOUT_MS = 120_000L
+        private const val TURNFU_CAPTCHA_NOTIFICATION_ID = 4710
         private const val XRAY_SOCKS_READY_TIMEOUT_MS = 8_000L
     }
 }

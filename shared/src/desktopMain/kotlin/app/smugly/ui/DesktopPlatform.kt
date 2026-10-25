@@ -305,12 +305,11 @@ class DesktopPlatform(
             )
         }
 
-        // slipstream / s3fu / cdnfu / xray — both the exported config= blob and the
+        // slipstream / s3fu / xray — both the exported config= blob and the
         // query-param form the panel actually mints (url/psk/domain/…).
         if (trimmed.startsWith("xray://", ignoreCase = true) ||
             trimmed.startsWith("slipstream://", ignoreCase = true) ||
-            trimmed.startsWith("s3fu://", ignoreCase = true) ||
-            trimmed.startsWith("cdnfu://", ignoreCase = true)
+            trimmed.startsWith("s3fu://", ignoreCase = true)
         ) {
             return app.smugly.desktop.DesktopProfileLinks.parse(
                 trimmed,
@@ -362,7 +361,7 @@ class DesktopPlatform(
         val b64 = Base64.getUrlEncoder().withoutPadding().encodeToString(payload.toByteArray())
         val scheme = when (profile.config.protocol) {
             Config.TunnelProtocol.S3FU -> "s3fu"
-            Config.TunnelProtocol.CDNFU -> "cdnfu"
+            Config.TunnelProtocol.TURNFU -> "turnfu"
             Config.TunnelProtocol.XRAY -> "xray"
             else -> "slipstream"
         }

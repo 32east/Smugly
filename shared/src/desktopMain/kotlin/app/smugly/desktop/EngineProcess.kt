@@ -142,8 +142,7 @@ class EngineProcess(
      * to the engine — a loop that fills the local connection cap in seconds.
      *
      * `NO_PROXY=*` covers hostnames. Clearing the `*_PROXY` vars stops stacks that only
-     * look at the environment. wreq still reads the WinINET registry, so cdnfu also
-     * calls `ClientBuilder::no_proxy()`; this env is the belt for everything else.
+     * look at the environment.
      */
     private fun isolateFromSystemProxy(env: MutableMap<String, String>) {
         env["NO_PROXY"] = "*"

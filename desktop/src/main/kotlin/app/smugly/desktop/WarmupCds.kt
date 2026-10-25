@@ -153,17 +153,6 @@ private fun runWarmup(onStep: (String) -> Unit) {
             )
         )
     }
-    bake("Loading CDN editor…") {
-        editor(
-            emptyDraft(
-                base.copy(
-                    protocol = Config.TunnelProtocol.CDNFU,
-                    cdnfuUrl = "https://edge.example/",
-                    cdnfuPsk = "warmup"
-                )
-            )
-        )
-    }
     bake("Loading Xray editor…") {
         editor(
             emptyDraft(

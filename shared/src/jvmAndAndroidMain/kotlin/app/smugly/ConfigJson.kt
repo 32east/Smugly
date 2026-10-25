@@ -1,6 +1,7 @@
 package app.smugly
 
 import org.json.JSONObject
+import org.json.JSONArray
 
 /**
  * Pure JSON (de)serialization for [Config] / [ConfigProfile] shared by Android
@@ -42,22 +43,18 @@ object ConfigJson {
             .put("s3Prefix", config.s3Prefix)
             .put("s3Psk", config.s3Psk)
             .put("xrayConfigJson", config.xrayConfigJson)
-            .put("cdnfuUrl", config.cdnfuUrl)
-            .put("cdnfuHost", config.cdnfuHost)
-            .put("cdnfuPsk", config.cdnfuPsk)
-            .put("cdnfuMimic", config.cdnfuMimic)
-            .put("cdnfuUplinkMethod", config.cdnfuUplinkMethod)
-            .put("cdnfuUplinkPath", config.cdnfuUplinkPath)
-            .put("cdnfuUplinkData", config.cdnfuUplinkData)
-            .put("cdnfuXhttpPlacement", config.cdnfuXhttpPlacement)
-            .put("cdnfuDownlinkMode", config.cdnfuDownlinkMode)
-            .put("cdnfuMultipath", config.cdnfuMultipath)
             // The whole client config as text. Kept alongside the legacy per-field values
             // rather than replacing them, so a profile written by this build still opens
             // in an older one (it falls back to the fields) instead of losing its server.
             .put("s3fuToml", config.s3fuToml)
-            .put("cdnfuToml", config.cdnfuToml)
             .put("xrayManual", config.xrayManual)
+            .put("turnfuHost", config.turnfuHost)
+            .put("turnfuPort", config.turnfuPort)
+            .put("turnfuPassword", config.turnfuPassword)
+            .put("turnfuWorkers", config.turnfuWorkers)
+            .put("turnfuMtu", config.turnfuMtu)
+            .put("turnfuCalls", JSONArray(config.turnfuCalls))
+            .put("turnfuToken", config.turnfuToken)
 
     fun configFromJson(json: JSONObject): Config =
         Config(
@@ -87,19 +84,15 @@ object ConfigJson {
             s3Prefix = json.optString("s3Prefix", "").ifBlank { "s3fu" },
             s3Psk = json.optString("s3Psk", ""),
             xrayConfigJson = json.optString("xrayConfigJson", ""),
-            cdnfuUrl = json.optString("cdnfuUrl", ""),
-            cdnfuHost = json.optString("cdnfuHost", ""),
-            cdnfuPsk = json.optString("cdnfuPsk", ""),
-            cdnfuMimic = json.optString("cdnfuMimic", "").ifBlank { "mixed" },
-            cdnfuUplinkMethod = json.optString("cdnfuUplinkMethod", "").ifBlank { "POST" },
-            cdnfuUplinkPath = json.optString("cdnfuUplinkPath", "").ifBlank { "api" },
-            cdnfuUplinkData = json.optString("cdnfuUplinkData", "").ifBlank { "body" },
-            cdnfuXhttpPlacement = json.optString("cdnfuXhttpPlacement", "").ifBlank { "cookie" },
-            cdnfuDownlinkMode = json.optString("cdnfuDownlinkMode", "").ifBlank { "stream" },
-            cdnfuMultipath = json.optInt("cdnfuMultipath", 4).coerceIn(0, 32),
             s3fuToml = json.optString("s3fuToml", ""),
-            cdnfuToml = json.optString("cdnfuToml", ""),
             xrayManual = json.optBoolean("xrayManual", false),
+            turnfuHost = json.optString("turnfuHost", ""),
+            turnfuPort = json.optInt("turnfuPort", 46000).coerceIn(1, 65535),
+            turnfuPassword = json.optString("turnfuPassword", ""),
+            turnfuWorkers = json.optInt("turnfuWorkers", 20).coerceIn(5, 100),
+            turnfuMtu = json.optInt("turnfuMtu", 1200).coerceIn(576, 1500),
+            turnfuCalls = json.optJSONArray("turnfuCalls")?.let { a -> List(a.length()) { a.optString(it) }.filter(String::isNotBlank) }.orEmpty(),
+            turnfuToken = json.optString("turnfuToken", ""),
         )
 
     fun profileToJson(profile: ConfigProfile): JSONObject =

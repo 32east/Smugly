@@ -23,7 +23,9 @@ class ExtraSettingsCodecTest {
             tun = TunSettings(mtu = 1280, ipv6 = false, bypassLan = true, dnsServers = "94.140.14.14, 9.9.9.9"),
             routing = RoutingSettings(directRu = true, blockAds = true),
             autoConnectOnBoot = true,
-            allowLan = true
+            allowLan = true,
+            rootMode = RootMode.TUN2SOCKS,
+            rootHotspot = true
         )
         val stored = ExtraSettingsCodec.encode(s)
         assertEquals(ExtraSettingsCodec.keys.toSet(), stored.keys)
@@ -37,6 +39,25 @@ class ExtraSettingsCodecTest {
         assertEquals(RoutingSettings(), decoded.routing)
         assertFalse(decoded.autoConnectOnBoot)
         assertFalse(decoded.allowLan)
+        assertEquals(RootMode.OFF, decoded.rootMode)
+        assertFalse(decoded.rootHotspot)
+    }
+
+    @Test
+    fun unknownRootModeFallsBackToOff() {
+        val decoded = ExtraSettingsCodec.decode(base) { if (it == "rootMode") "tproxy-v9" else null }
+        assertEquals(RootMode.OFF, decoded.rootMode)
+        val upper = ExtraSettingsCodec.decode(base) { if (it == "rootMode") " TUN2SOCKS " else null }
+        assertEquals(RootMode.TUN2SOCKS, upper.rootMode)
+    }
+
+    @Test
+    fun rootSettingsAskForReconnect() {
+        val on = base.copy(rootMode = RootMode.TUN2SOCKS)
+        assertTrue(base.needsReconnectToApply(on))
+        assertTrue(on.needsReconnectToApply(on.copy(rootHotspot = true)))
+        assertFalse(base.needsReconnectToApply(base.copy(perAppMode = PerAppMode.ALLOWED)))
+        assertTrue(on.needsReconnectToApply(on.copy(perAppMode = PerAppMode.ALLOWED)))
     }
 
     @Test
@@ -91,9 +112,13 @@ class ExtraSettingsCodecTest {
             tun = TunSettings(mtu = 1300, ipv6 = false, bypassLan = true, dnsServers = "9.9.9.9"),
             routing = RoutingSettings(directRu = true, blockAds = true),
             autoConnectOnBoot = true,
-            allowLan = true
+            allowLan = true,
+            rootMode = RootMode.TUN2SOCKS,
+            rootHotspot = true
         )
         val reset = dirty.resetToDefaults(Config.Mode.VPN)
+        assertEquals(RootMode.OFF, reset.rootMode)
+        assertFalse(reset.rootHotspot)
         assertEquals(1080, reset.listenPort)
         assertEquals(Config.Mode.VPN, reset.mode)
         assertFalse(reset.fileLogging)

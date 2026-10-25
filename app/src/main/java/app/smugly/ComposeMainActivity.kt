@@ -50,6 +50,10 @@ class ComposeMainActivity : ComponentActivity() {
 
     private fun handleImportIntent(intent: Intent?) {
         val data = intent?.data ?: return
+        if (data.scheme.equals("smugly", ignoreCase = true) && data.host.equals("paid", ignoreCase = true)) {
+            platform.notifyPaymentReturn()
+            return
+        }
         if (data.scheme.equals("smugly", ignoreCase = true) &&
             (data.host.equals("account", ignoreCase = true) || data.host.equals("external-login", ignoreCase = true))
         ) {

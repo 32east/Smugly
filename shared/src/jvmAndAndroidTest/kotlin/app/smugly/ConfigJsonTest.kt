@@ -39,24 +39,4 @@ class ConfigJsonTest {
         assertTrue(c.domain.isEmpty())
     }
 
-    @Test
-    fun cdnfu_roundtrip() {
-        val original = defaultConfig().copy(
-            protocol = Config.TunnelProtocol.CDNFU,
-            cdnfuUrl = "http://151.236.109.225/",
-            // Edge IP in the URL, real name in the Host field — the profile shape that
-            // reaches a CDN which only serves the resource from one edge.
-            cdnfuHost = "jarvis-media.ru",
-            cdnfuPsk = "cdnfu-lab-jarvis-2026",
-            cdnfuMimic = "mixed",
-            cdnfuUplinkMethod = "POST",
-            cdnfuUplinkPath = "api",
-            cdnfuUplinkData = "body",
-            cdnfuXhttpPlacement = "cookie",
-            cdnfuDownlinkMode = "poll",
-            cdnfuMultipath = 4
-        )
-        val restored = ConfigJson.configFromJson(ConfigJson.configToJson(original))
-        assertEquals(original, restored)
-    }
 }
